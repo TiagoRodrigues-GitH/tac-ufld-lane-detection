@@ -27,7 +27,10 @@ EXCLUDED_PARTS = {".venv", "venv", "env", "__pycache__", ".pytest_cache", "datas
 RESULT_PATTERNS = ("config_resolved.yaml", "environment.json", "all_results.csv", "report/*.md", "report/*.csv",
                    "report/*.png", "report/*.json", "data/split_summary.csv", "data/split_report.json",
                    "data/label_geometry_check.csv", "hpo/*.json", "seed_*/history_*.csv", "seed_*/results.csv",
-                   "seed_*/postprocess/*_tuned.json", "seed_*/plots/*.png")
+                   "seed_*/postprocess/*_tuned.json", "seed_*/plots/*.png",
+                   "deploy/*/numerical_checks.json", "deploy/*/deployment.json",   # export checks
+                   "*.md", "*.json",                                                # benchmark reports
+                   "index.html", "assets/*.jpg")                                    # offline results page
 MAX_RESULT_FILE_MB = 5
 
 
