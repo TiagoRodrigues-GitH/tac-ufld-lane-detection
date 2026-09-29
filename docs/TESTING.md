@@ -51,7 +51,8 @@ GPU runs:
 |---|---|
 | ELAS smoke, before the changes (`configs/elas_smoke.yaml`) | exit 0, 8 min 36 s; lane F1 = 0 for every model (plumbing config) |
 | **ELAS GPU pilot** after the changes (`configs/elas_pilot.yaml`, commit `96b4505`) | exit 0, 2 h 22 min; results in `docs/PILOT_FINDINGS.md` |
-| ELAS smoke on the final commit | SMOKE_PLACEHOLDER |
+| ELAS smoke on the final code (commit `2b60ae7`) | exit 0, 21 min 39 s (the machine was also building the GPU Docker image; 8 min 36 s alone before the changes); every stage and output present, incl. `report/config_changes.json` and the protocol section |
+| Model sanity, real ELAS batch | all six variants pass, on the host (CPU) and inside the GPU container (`--gpus all`) |
 | Export + TensorRT FP32/FP16/INT8 on three pilot checkpoints | all engines built and ran; validation F1 table in `docs/DEPLOYMENT.md` |
 | `validate-dataset --dataset elas` (real data) | OK: 7,561 frames, 10 scenes, 0 lane-order violations, 0 % missing history |
 

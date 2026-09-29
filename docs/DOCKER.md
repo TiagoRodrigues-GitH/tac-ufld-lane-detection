@@ -51,4 +51,10 @@ Mounts: `/data/elas`, `/data/culane`, `/data/tusimple`, `/data/openlane` (read-o
 
 ## Validation status
 
-`docker compose config` parses (tested). The CPU image was built and run on the development machine; results are in `docs/TESTING.md`. The GPU image was not run on this machine: Docker Desktop's GPU passthrough was not exercised in this session, so the GPU container path is **not validated**.
+Validated on the development machine (Windows 11, Docker Desktop 29.1 with the WSL 2 backend, RTX 3050):
+
+* `docker compose config` parses (also a test).
+* **CPU image** (`tac-ufld:cpu`, 809 MB content): built in 6 min; `doctor` finds ELAS through `ELAS_ROOT`; the test suite passes inside it (`docs/TESTING.md`).
+* **GPU image** (`tac-ufld:gpu`, 4.0 GB content, PyTorch 2.8.0+cu126): built in 33 min; with `--gpus all` the container sees the RTX 3050 (CUDA available, cuDNN 9.1) and `python -m tac_ufld sanity --config configs/elas_pilot.yaml --device cuda --real` passes for all six variants on a real ELAS batch.
+
+Not run in a container: a full training run and the Streamlit service (`docker compose up ui`); both use the same image and code paths as above.

@@ -51,14 +51,14 @@ ELAS geometry (real-data regression test), missing/unknown slots, ROI ignore row
 * ONNX export with the streaming split (encoder/head/clip), ONNX Runtime FP32 (matches PyTorch to 1e-5), INT8 with validation-frame calibration, TensorRT FP32/FP16/INT8 engines on the RTX 3050, numerical and task-level checks, `deployment.json` model cards.
 * Hardware budget benchmark (measured) + real-time simulation (assumed slowdowns, clearly separated).
 * Streamlit UI (never trains; tested to start headless and to import no training code).
-* Docker / Compose (configuration tested; CPU image built and run: `docs/TESTING.md`).
+* Docker / Compose: CPU image built and the test suite run inside it; GPU image built and run with `--gpus all` on the RTX 3050 (sanity checks on real ELAS data), `docs/DOCKER.md`.
 * Static results page for GitHub Pages; hand-off packager; `doctor`.
 * **GPU pilot** of the full protocol (2 seeds, ≤ 4 epochs, no HPO): completed in 2 h 22 min. Findings in `docs/PILOT_FINDINGS.md`.
 
 ### Newly implemented but not validated
 * CULane, TuSimple and OpenLane on **real data** (no copy was available): run `python -m tac_ufld validate-dataset --dataset <name>` first. OpenLane's native metric settings follow our reading of the official 2D evaluation, not cross-checked.
 * ONNX Runtime on GPU (the PyPI GPU build needs CUDA 13; ran on CPU here).
-* Docker GPU container path.
+* A full training run inside Docker (the GPU container itself was verified).
 * CARLA frame source.
 
 ### Requires a GPU

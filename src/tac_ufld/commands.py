@@ -195,7 +195,7 @@ def cmd_sanity(args) -> int:
     if args.real:
         from tac_ufld.data import build_adapter
         from tac_ufld.data.dataset import TemporalLaneDataset
-        from tac_ufld.data.splits import build_splits
+        from tac_ufld.data.splits import build_splits, consecutive_frames
         from tac_ufld.data.targets import make_row_anchors
 
         d = cfg.data
@@ -203,8 +203,9 @@ def cmd_sanity(args) -> int:
         splits, _ = build_splits(cfg, adapter)
         anchors = make_row_anchors(d.img_h, d.num_row_anchors, d.row_anchor_range)
         batches = {}
+        sample = consecutive_frames(splits.train, 2, runs=2)  # mid-sequence: real history frames exist
         for frames in {1, d.num_frames}:
-            ds = TemporalLaneDataset(splits.train[:2], adapter, d, anchors, frames, augment=True)
+            ds = TemporalLaneDataset(sample, adapter, d, anchors, frames, augment=True)
             items = [ds[i] for i in range(2)]
             batches[frames] = {k: __import__("torch").stack([it[k] for it in items]) for k in items[0] if k != "index"}
     rows = run_sanity(cfg, variants, _device(args.device), batches)
