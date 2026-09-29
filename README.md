@@ -95,7 +95,7 @@ Requirements: Python ≥ 3.10, an NVIDIA GPU is recommended (CPU works for tests
 
 ```powershell
 # 1. Clone and enter the project
-git clone https://github.com/<your-user>/tac-ufld-lane-detection.git
+git clone https://github.com/TiagoRodrigues-GitH/tac-ufld-lane-detection.git
 cd tac-ufld-lane-detection
 
 # 2. Virtual environment
