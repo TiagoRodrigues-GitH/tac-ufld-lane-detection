@@ -55,12 +55,12 @@ def _excluded(rel: Path) -> bool:
 
 
 def result_files(run: Path) -> list[Path]:
-    out = []
+    out: dict[Path, None] = {}  # ordered and unique: several patterns can match one file
     for pattern in RESULT_PATTERNS:
         for p in sorted(run.glob(pattern)):
             if p.is_file() and p.stat().st_size <= MAX_RESULT_FILE_MB * 2**20 and p.suffix.lower() not in EXCLUDED_SUFFIXES:
-                out.append(p)
-    return out
+                out[p] = None
+    return list(out)
 
 
 def build_package(out_dir: Path, include_results: list[Path]) -> tuple[Path, str]:
@@ -75,6 +75,10 @@ def build_package(out_dir: Path, include_results: list[Path]) -> tuple[Path, str
         run = run if run.is_absolute() else PROJECT_ROOT / run
         for p in result_files(run):
             entries.append((p, f"pilot_results/{run.name}/{p.relative_to(run).as_posix()}"))
+    arcnames = [a for _, a in entries]
+    duplicates = sorted({a for a in arcnames if arcnames.count(a) > 1})
+    if duplicates:
+        raise RuntimeError(f"duplicate archive entries: {duplicates[:5]}")
     manifest = [f"TAC-UFLD hand-off package v{__version__}, git {commit}{' + uncommitted changes' if dirty else ''}, "
                 f"built {stamp}", ""]
     total = 0

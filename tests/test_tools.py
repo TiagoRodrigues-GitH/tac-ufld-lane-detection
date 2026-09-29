@@ -155,9 +155,15 @@ def test_doctor_reports_environment():
 def test_package_excludes_data_checkpoints_and_caches(tmp_path, tiny_run):
     from tac_ufld.package import build_package
 
-    zip_path, report = build_package(tmp_path, [])
+    run = tmp_path / "results" / "fake_run"
+    (run / "seed_1" / "checkpoints").mkdir(parents=True)
+    (run / "environment.json").write_text("{}", encoding="utf-8")        # matched by two patterns
+    (run / "seed_1" / "checkpoints" / "m.pt").write_bytes(b"0")           # must never be packaged
+    zip_path, report = build_package(tmp_path / "dist", [run])
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
+    assert len(names) == len(set(names))
+    assert any(n.endswith("pilot_results/fake_run/environment.json") for n in names)
     root = names[0].split("/")[0]
     rel = [n[len(root) + 1:] for n in names]
     assert "MANIFEST.txt" in rel and "src/tac_ufld/cli.py" in rel and "configs/datasets.yaml" in rel
