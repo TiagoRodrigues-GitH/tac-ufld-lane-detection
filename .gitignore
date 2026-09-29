@@ -32,3 +32,12 @@ reference/supervisor/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Exported models, hand-off builds, generated site (published on gh-pages)
+*.onnx
+*.engine
+*.plan
+/dist/
+/site/
+.env
+*.prof

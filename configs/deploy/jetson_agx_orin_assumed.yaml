@@ -1,0 +1,17 @@
+# Budget profile for a Jetson AGX Orin 64 GB - SIMULATION ONLY.
+# The slowdown factor is an ASSUMPTION (peak FP32 GPU throughput ratio,
+# RTX 3050 ~9 TFLOPS vs AGX Orin ~5.3 TFLOPS). Measure on the device.
+name: jetson_agx_orin_assumed
+description: "AGX Orin (assumed 1.7x slower than the RTX 3050 desktop), 30 FPS camera, 3 % sensor drops."
+target_fps: 30
+max_latency_ms: 50
+memory_budget_mb: 4096
+input_height: 480
+input_width: 640
+batch_size: 1
+precision: fp16
+drop_rate: 0.03
+slowdown: 1.7
+slowdown_source: "assumed from peak FP32 TFLOPS (RTX 3050 ~9 vs AGX Orin ~5.3); not measured"
+frames: 900
+policy: latest

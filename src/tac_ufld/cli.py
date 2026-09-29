@@ -149,6 +149,11 @@ def cmd_run(args) -> int:
         configs = [resolve_config(args, e.config_path(smoke=args.smoke), e.name) for e in entries]
     else:
         configs = [resolve_config(args)]
+    unconfirmed = [c.name for c in configs if c.requires_confirmation and not args.confirm]
+    if unconfirmed:  # refuse before anything (output folders, logs) is created
+        print(f"error: {', '.join(unconfirmed)} is marked requires_confirmation (a long, full experiment). "
+              f"Re-run with --confirm to start it.", file=sys.stderr)
+        return 2
     for cfg in configs:
         runner = ExperimentRunner(cfg, variants=args.variants, seeds=args.seeds, resume=args.resume,
                                   confirmed=args.confirm)

@@ -67,3 +67,23 @@ The audit that motivated the merge is in [AUDIT_REPORT.md](AUDIT_REPORT.md). Its
 | TensorBoard per-epoch scalars | `training/trainer.py` | ported (graph/image logging dropped) |
 | torchview diagrams, Graphviz search, pip auto-install on import, disk-space guard | — | dropped (not needed for correctness; install dependencies explicitly) |
 | ADAS TRL3/TRL4 thresholds | — | dropped: no cited source (audit C8). Add them back as documented internal targets when a source exists |
+
+## v0.3 changes (2026-09-29)
+
+Audit of the starting point: [AUDIT_V03.md](AUDIT_V03.md). Nothing in the model definitions, losses, metrics, split protocol or selection rules changed; defaults reproduce v0.2 exactly (tested for the input pipeline and the photometric augmentation).
+
+| Area | Change | Where | Test |
+|---|---|---|---|
+| Resume (bug) | a partially trained variant was treated as finished; now completion = history CSV; epoch-level `<variant>.last.pt` (optimizer, scheduler, scaler, RNG, loader state); finished HPO studies reused | `training/trainer.py`, `experiment.py` | `test_registry_cli.py`, integration |
+| Full-run guard | `requires_confirmation` + `--confirm`; nothing created before the check | `cli.py`, `experiment.py`, configs | `test_full_run_requires_confirmation` |
+| CULane (bug) | `temporal_step` 30 → 90 (supervisor's value); official segmentation-label slots; existence-flag check; stride report | `data/culane.py`, `configs/culane.yaml` | `test_datasets.py` |
+| Datasets | registry `configs/datasets.yaml`; TuSimple, OpenLane adapters; validation carving; native metrics; `validate-dataset` | `data/registry.py`, `data/tusimple.py`, `data/openlane.py`, `data/splits.py`, `evaluation/native.py`, `data/validation.py` | `test_datasets.py`, `test_registry_cli.py` |
+| Input | preprocessing ablations; `conv1` adaptation for 1/4 channels | `data/preprocess.py`, `models/resnet.py` | `test_preprocess_augment.py` |
+| Augmentation | geometric (homography + label re-encoding), extended photometric | `data/geometric.py`, `data/transforms.py` | `test_preprocess_augment.py` |
+| Training options | label smoothing, UFLD head dropout, lite dropout config | `losses.py`, `models/` | `test_tools.py` (sanity), existing loss tests |
+| Checkpoints | self-describing: resolved config + model card; tuned post-processing JSON | `experiment.py`, `inference/card.py` | `test_streaming.py` |
+| Inference | streaming with history-feature caching; backends | `inference/` | `test_streaming.py` |
+| Deployment | ONNX (streaming split), ONNX Runtime, TensorRT, FP16/INT8, numerical + task checks; export bugs fixed (wrapper train mode, BatchNorm update) | `deploy/` | `test_deploy.py` |
+| Benchmark | measured latency + budget simulation | `evaluation/hardware.py` | `test_tools.py` |
+| UI, site, packaging, doctor, Docker | new | `ui/`, `site.py`, `package.py`, `doctor.py`, `Dockerfile`, `docker-compose.yml` | `test_ui.py`, `test_site.py`, `test_tools.py`, `test_docker.py` |
+| Tooling | `sanity`, `ablate`, `export`, `stream`, `benchmark`, `ui`, `site`, `package`, `doctor`, `carla-demo` commands | `commands.py` | `test_tools.py` |

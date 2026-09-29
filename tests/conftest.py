@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import cv2
@@ -11,7 +12,8 @@ import pytest
 from tac_ufld.config import PROJECT_ROOT, load_config
 from tac_ufld.data.elas import ELAS_ROW_FRACTIONS
 
-REAL_ELAS = (PROJECT_ROOT / "../../datasets/dataset_elas_v1").resolve()
+REAL_ELAS = (Path(os.environ["ELAS_ROOT"]) if os.environ.get("ELAS_ROOT")
+             else PROJECT_ROOT / "../../datasets/dataset_elas_v1").resolve()
 
 
 def lane_x(y: np.ndarray, side: str, width: int, height: int, drift: float = 0.0) -> np.ndarray:

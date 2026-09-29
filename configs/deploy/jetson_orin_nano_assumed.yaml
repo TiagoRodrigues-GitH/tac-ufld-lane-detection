@@ -1,0 +1,20 @@
+# Budget profile for a Jetson Orin Nano 8 GB - SIMULATION ONLY.
+# The slowdown factor is an ASSUMPTION: ratio of peak FP32 GPU throughput
+# between an RTX 3050 desktop (~9 TFLOPS) and the Orin Nano GPU (~1.3 TFLOPS),
+# rounded. Real ratios depend on memory bandwidth, TensorRT kernels, power
+# mode (nvpmodel) and clocks (jetson_clocks). Replace it with a measurement
+# on the device (docs/DEPLOYMENT.md, "Measuring on the Jetson").
+name: jetson_orin_nano_assumed
+description: "Orin Nano 8 GB (assumed 7x slower than the RTX 3050 desktop), 30 FPS camera, 3 % sensor drops."
+target_fps: 30
+max_latency_ms: 66
+memory_budget_mb: 1500
+input_height: 480
+input_width: 640
+batch_size: 1
+precision: fp16
+drop_rate: 0.03
+slowdown: 7.0
+slowdown_source: "assumed from peak FP32 TFLOPS (RTX 3050 ~9 vs Orin Nano ~1.3); not measured"
+frames: 900
+policy: latest

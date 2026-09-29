@@ -89,16 +89,22 @@ def test_datasets_command_lists_without_scanning_disabled(capsys):
     assert "disabled (not scanned)" in out and "elas" in out
 
 
-def test_full_run_requires_confirmation(monkeypatch, capsys):
-    """`run` on configs/elas.yaml must refuse to start without --confirm and
-    must not train anything."""
+def test_full_run_requires_confirmation(monkeypatch, capsys, tmp_path):
+    """`run` on configs/elas.yaml must refuse to start without --confirm, must
+    not train anything and must not even create its output folder."""
     from tac_ufld import experiment
 
     called = []
-    monkeypatch.setattr(experiment.ExperimentRunner, "prepare_data", lambda self: called.append(1))
-    assert cli.main(["run", "--config", str(PROJECT_ROOT / "configs" / "elas.yaml"), "--name", "guard_test",
-                     "--device", "cpu"]) == 2
-    assert "--confirm" in capsys.readouterr().err and not called
+    monkeypatch.setattr(experiment.ExperimentRunner, "__init__", lambda self, *a, **k: called.append(1))
+    config = tmp_path / "full.yaml"
+    config.write_text((PROJECT_ROOT / "configs" / "elas.yaml").read_text(encoding="utf-8").replace(
+        "output_dir: results", f"output_dir: \"{(tmp_path / 'out').as_posix()}\""), encoding="utf-8")
+    assert cli.main(["run", "--config", str(config), "--device", "cpu"]) == 2
+    assert "--confirm" in capsys.readouterr().err and not called and not (tmp_path / "out").exists()
+    runner = experiment.ExperimentRunner.__new__(experiment.ExperimentRunner)
+    runner.cfg, runner.confirmed, runner.variants, runner.seeds = load_config(config), False, ["x"], [1]
+    with pytest.raises(experiment.FullRunNotConfirmed):  # second line of defence inside the runner
+        experiment.ExperimentRunner.run(runner)
     assert load_config(PROJECT_ROOT / "configs" / "elas.yaml").requires_confirmation
     for name in ("elas_smoke.yaml", "elas_pilot.yaml"):
         assert not load_config(PROJECT_ROOT / "configs" / name).requires_confirmation

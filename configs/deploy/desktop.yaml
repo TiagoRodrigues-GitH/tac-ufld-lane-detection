@@ -1,0 +1,15 @@
+# Budget profile: the development desktop itself (no slowdown assumption).
+name: desktop
+description: "Measured machine, 30 FPS camera, 50 ms end-to-end budget."
+target_fps: 30
+max_latency_ms: 50
+memory_budget_mb: 2048
+input_height: 480
+input_width: 640
+batch_size: 1
+precision: fp32
+drop_rate: 0.0
+slowdown: 1.0
+slowdown_source: "none: the measuring machine"
+frames: 900
+policy: latest

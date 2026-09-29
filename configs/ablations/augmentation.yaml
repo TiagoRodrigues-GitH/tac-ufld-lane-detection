@@ -1,0 +1,42 @@
+# Augmentation / regularisation ablation (the pilot shows strong overfitting:
+# train focal loss falls ~10x within 3 epochs while validation loss rises).
+#   python -m tac_ufld ablate --spec configs/ablations/augmentation.yaml --confirm
+#
+# The reference arm is the ORIGINAL augmentation (photometric only), i.e.
+# the configuration every existing result used.
+
+name: ablation_augmentation
+description: "Augmentation and regularisation ablation on the UFLD baseline (ELAS)."
+base_config: configs/elas_pilot.yaml
+variants: [ufld_baseline]
+seeds: [1, 2, 3]
+hpo: false
+reference_arm: photometric
+arms:
+  photometric: {}
+  none: {data.augmentation.enabled: false}
+  geometric:
+    data.augmentation.geometric.enabled: true
+    data.augmentation.geometric.prob: 0.7
+    data.augmentation.geometric.translate_x: 0.08
+    data.augmentation.geometric.translate_y: 0.05
+    data.augmentation.geometric.scale: [0.9, 1.1]
+    data.augmentation.geometric.rotate_deg: 5.0
+    data.augmentation.geometric.perspective: 0.03
+    data.augmentation.geometric.crop_scale: [0.85, 1.0]
+  geometric_flip:
+    data.augmentation.geometric.enabled: true
+    data.augmentation.geometric.prob: 0.7
+    data.augmentation.geometric.translate_x: 0.08
+    data.augmentation.geometric.rotate_deg: 5.0
+    data.augmentation.geometric.hflip_prob: 0.5
+  photometric_extended:
+    data.augmentation.gamma: 0.3
+    data.augmentation.hue: 0.03
+    data.augmentation.blur_prob: 0.2
+    data.augmentation.motion_blur_prob: 0.2
+    data.augmentation.shadow_prob: 0.3
+  regularised:
+    model.head_dropout: 0.3
+    train.loss.label_smoothing: 0.05
+    train.weight_decay: 5.0e-4

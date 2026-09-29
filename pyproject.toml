@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tac-ufld"
-version = "0.2.0"
-description = "Reproducible UFLD baseline vs temporal lane detection (ELAS, CULane)"
+version = "0.3.0"
+description = "Reproducible UFLD baseline vs temporal lane detection (ELAS, CULane, TuSimple, OpenLane) with streaming and embedded deployment"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -24,6 +24,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+ui = ["streamlit>=1.40", "torchview>=0.2"]
+deploy = ["onnx>=1.16", "onnxruntime>=1.18", "onnxscript>=0.1", "onnxconverter-common>=1.14"]
+# Desktop TensorRT (large download, CUDA 12). On Jetson use the TensorRT of JetPack instead.
+tensorrt = ["tensorrt-cu12>=10.0"]
+all = ["tac-ufld[dev,ui,deploy]"]
 
 [project.scripts]
 tac-ufld = "tac_ufld.cli:main"

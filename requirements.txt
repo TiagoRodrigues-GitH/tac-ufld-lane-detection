@@ -1,7 +1,7 @@
 # Install PyTorch first with the command for your CUDA version from
 # https://pytorch.org/get-started/locally/ , e.g.
 #   pip install torch --index-url https://download.pytorch.org/whl/cu126
-# then:  pip install -r requirements.txt  (or: pip install -e ".[dev]")
+# then:  pip install -r requirements.txt   (or: pip install -e ".[all]")
 numpy>=1.24
 pandas>=2.0
 scipy>=1.10
@@ -13,3 +13,13 @@ PyYAML>=6
 openpyxl>=3.1
 tensorboard>=2.14
 pytest>=7
+# user interface
+streamlit>=1.40
+torchview>=0.2
+# deployment (ONNX export / ONNX Runtime / FP16 / INT8)
+onnx>=1.16
+onnxruntime>=1.18
+onnxscript>=0.1
+onnxconverter-common>=1.14
+# optional, large: TensorRT on a desktop GPU (Jetson: use JetPack's TensorRT)
+# tensorrt-cu12>=10.0

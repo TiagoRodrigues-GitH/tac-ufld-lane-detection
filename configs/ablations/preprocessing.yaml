@@ -1,0 +1,28 @@
+# Preprocessing ablation: does the input representation matter?
+#   python -m tac_ufld ablate --spec configs/ablations/preprocessing.yaml            # plan only
+#   python -m tac_ufld ablate --spec configs/ablations/preprocessing.yaml --confirm  # run
+#
+# Every arm uses the base config's split, seeds, epochs and model family
+# (enforced). gray3 keeps the RGB architecture; gray/edge/canny/hough (1
+# channel) and rgb_edge (4 channels) adapt the first convolution, so they
+# are separate configurations, not drop-in replacements. These are
+# experimental options: none is expected to help without evidence.
+# For a screening run the base is the short pilot budget; point base_config
+# at configs/elas.yaml (and use >= 6 seeds) for a conclusive comparison.
+
+name: ablation_preprocessing
+description: "Input representation ablation on the UFLD baseline (ELAS)."
+base_config: configs/elas_pilot.yaml
+variants: [ufld_baseline]
+seeds: [1, 2, 3]
+hpo: false
+reference_arm: rgb
+arms:
+  rgb: {}
+  gray3: {data.preprocessing.mode: gray3}
+  gray: {data.preprocessing.mode: gray}
+  edge: {data.preprocessing.mode: edge}
+  canny: {data.preprocessing.mode: canny, data.preprocessing.canny_low: 50, data.preprocessing.canny_high: 150}
+  hough: {data.preprocessing.mode: hough, data.preprocessing.hough_threshold: 30}
+  rgb_edge: {data.preprocessing.mode: rgb_edge, data.preprocessing.edge_source: sobel}
+  clahe_rgb: {data.preprocessing.pre_ops: [clahe]}

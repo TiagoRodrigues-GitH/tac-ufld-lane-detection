@@ -125,7 +125,13 @@ class LogitsGraph(nn.Module):
 def _export(module: nn.Module, args: tuple, path: Path, input_names: list[str], output_names: list[str],
             opset: int) -> str:
     """Try the TorchScript exporter first (mature operator coverage, stable
-    graphs for TensorRT), then the dynamo exporter."""
+    graphs for TensorRT), then the dynamo exporter.
+
+    The wrapper is put in eval mode first: ``torch.onnx.export`` restores the
+    wrapper's original mode afterwards, recursively, and a fresh wrapper
+    starts in train mode - which would silently switch the wrapped model
+    (BatchNorm, dropout) to training."""
+    module.eval()
     path.parent.mkdir(parents=True, exist_ok=True)
     errors = []
     for dynamo in (False, True):
@@ -158,6 +164,7 @@ def export_model(loaded: LoadedModel, out_dir: str | Path, opset: int = OPSET) -
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     model = loaded.model.eval().float().cpu()
+    before = {k: v.detach().clone() for k, v in model.state_dict().items()}
     d = loaded.cfg.data
     c = loaded.card["input"]["channels"]
     frame = torch.randn(1, c, d.img_h, d.img_w)
@@ -188,6 +195,10 @@ def export_model(loaded: LoadedModel, out_dir: str | Path, opset: int = OPSET) -
             how = _export(LogitsGraph(model), (clip,), out / "clip.onnx", ["clip"], ["logits"], opset)
             graphs["clip"] = {"file": "clip.onnx", "inputs": {"clip": list(clip.shape)},
                               "outputs": {"logits": logits_shape}, "exporter": how}
+    changed = [k for k, v in model.state_dict().items() if not torch.equal(v, before[k])]
+    if model.training or changed:
+        raise RuntimeError(f"export modified the model (training={model.training}, changed tensors: {changed[:5]})")
+    loaded.model.to(loaded.device)
     for g in graphs.values():
         g["onnx_ops"] = onnx_ops(out / g["file"])
     manifest = {

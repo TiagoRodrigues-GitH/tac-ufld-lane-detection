@@ -6,7 +6,9 @@ Checks, per split:
 
 * frame / sequence counts, adapter statistics (missing images, skipped lanes);
 * image sizes of a sample of files against the adapter's declared size;
-* lane coordinates inside the image; points per lane;
+* lane coordinates: lanes entirely or far outside the image (a coordinate-
+  convention error) are problems; points on or just past the border are
+  normal and only counted; points per lane;
 * slot occupancy and lane ORDER: for every pair of present slots i < j the
   lane in slot i must lie left of the lane in slot j at their lowest shared row;
 * availability of the temporal history frames for the configured
@@ -54,7 +56,7 @@ def _split_stats(records: list[FrameRecord], adapter, cfg: ExperimentConfig, seq
     n_slots = max((r.num_slots for r in records), default=0)
     present = np.zeros(n_slots, dtype=np.int64)
     unknown = np.zeros(n_slots, dtype=np.int64)
-    points, out_of_bounds, order_bad = [], 0, 0
+    points, partly_outside, entirely_outside, far_outside, order_bad = [], 0, 0, 0, 0
     for r in records:
         w, h = r.image_size
         for i, (lane, known) in enumerate(zip(r.lanes, r.slot_known)):
@@ -64,7 +66,14 @@ def _split_stats(records: list[FrameRecord], adapter, cfg: ExperimentConfig, seq
                 continue
             present[i] += 1
             points.append(len(lane))
-            out_of_bounds += int(((lane[:, 0] < 0) | (lane[:, 0] >= w) | (lane[:, 1] < 0) | (lane[:, 1] >= h)).any())
+            x, y = lane[:, 0], lane[:, 1]
+            inside = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+            # Points on or past the border are normal (ELAS annotates the ROI's bottom edge
+            # at y = height; lanes leave the image sideways). A lane with no point inside,
+            # or points far away, means a coordinate-convention error.
+            partly_outside += int(not inside.all())
+            entirely_outside += int(not inside.any())
+            far_outside += int(((x < -0.5 * w) | (x > 1.5 * w) | (y < -0.5 * h) | (y > 1.5 * h)).any())
         order_bad += int(_order_violation(r))
     rng = random.Random(0)
     # History before the first frame of a sequence is expected to be missing;
@@ -93,7 +102,9 @@ def _split_stats(records: list[FrameRecord], adapter, cfg: ExperimentConfig, seq
         "frames_without_lanes": int(sum(not r.has_any_lane() for r in records)),
         "points_per_lane": {"min": int(min(points, default=0)), "median": float(np.median(points)) if points else 0,
                             "max": int(max(points, default=0))},
-        "lanes_out_of_bounds": out_of_bounds,
+        "lanes_partly_outside_image": partly_outside,
+        "lanes_entirely_outside_image": entirely_outside,
+        "lanes_far_outside_image": far_outside,
         "lane_order_violations": order_bad,
         "lane_order_violation_rate": round(order_bad / n, 5),
         "history_missing_rate": round(history_missing / history_total, 4) if history_total else 0.0,
@@ -159,8 +170,10 @@ def validate_dataset(cfg: ExperimentConfig, out_dir: Path, n_overlays: int = 24)
     for name, s in report["splits"].items():
         if s["image_size_mismatches"]:
             problems.append(f"{name}: image sizes differ from the declared size")
-        if s["lanes_out_of_bounds"]:
-            problems.append(f"{name}: {s['lanes_out_of_bounds']} lanes with points outside the image")
+        n_lanes = max(1, int(round(sum(s["slot_present_rate"]) * s["frames"])))
+        bad = s["lanes_entirely_outside_image"] + s["lanes_far_outside_image"]
+        if bad / n_lanes > 0.01:
+            problems.append(f"{name}: {bad} lanes entirely or far outside the image (coordinate convention?)")
         if s["lane_order_violation_rate"] > 0.01:
             problems.append(f"{name}: lane slots out of left-to-right order in "
                             f"{100 * s['lane_order_violation_rate']:.1f}% of frames")

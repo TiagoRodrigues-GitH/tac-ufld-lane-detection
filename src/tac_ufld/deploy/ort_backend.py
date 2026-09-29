@@ -10,15 +10,43 @@ import numpy as np
 from tac_ufld.inference.backends import to_numpy
 
 
+_CUDA_WORKS: bool | None = None
+
+
+def _cuda_provider_works() -> bool:
+    """A provider can be listed but fail to load (e.g. onnxruntime-gpu built
+    for CUDA 13 next to a CUDA 12 PyTorch). Probe once with a tiny graph."""
+    global _CUDA_WORKS
+    if _CUDA_WORKS is None:
+        import onnxruntime as ort
+        from onnx import TensorProto, helper
+
+        graph = helper.make_graph([helper.make_node("Relu", ["x"], ["y"])], "probe",
+                                  [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+                                  [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+        model.ir_version = 9
+        ort.set_default_logger_severity(4)
+        try:
+            sess = ort.InferenceSession(model.SerializeToString(),
+                                        providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            _CUDA_WORKS = sess.get_providers()[0] == "CUDAExecutionProvider"
+        except Exception:
+            _CUDA_WORKS = False
+        finally:
+            ort.set_default_logger_severity(2)
+    return _CUDA_WORKS
+
+
 def ort_providers(prefer_gpu: bool = True) -> list[str]:
-    """CUDA first when the installed ONNX Runtime exposes it. Import torch
-    before ONNX Runtime so its CUDA/cuDNN DLLs are already loaded (Windows)."""
+    """CUDA first when the installed ONNX Runtime can actually load it. Import
+    torch before ONNX Runtime so its CUDA/cuDNN DLLs are already loaded (Windows)."""
     import torch  # noqa: F401  (loads the CUDA runtime DLLs shared with ONNX Runtime)
     import onnxruntime as ort
 
-    available = ort.get_available_providers()
     providers = []
-    if prefer_gpu and "CUDAExecutionProvider" in available and torch.cuda.is_available():
+    if (prefer_gpu and "CUDAExecutionProvider" in ort.get_available_providers() and torch.cuda.is_available()
+            and _cuda_provider_works()):
         providers.append("CUDAExecutionProvider")
     providers.append("CPUExecutionProvider")
     return providers

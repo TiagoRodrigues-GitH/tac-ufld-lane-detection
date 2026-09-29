@@ -32,9 +32,7 @@ from tac_ufld import __version__
 from tac_ufld.config import ExperimentConfig, save_config
 from tac_ufld.data import build_adapter
 from tac_ufld.data.dataset import TemporalLaneDataset
-from tac_ufld.data.splits import (
-    DataSplits, cap_records, carve_validation, check_no_leakage, official_split_report, split_scenes_and_blocks,
-)
+from tac_ufld.data.splits import DataSplits, build_splits, cap_records
 from tac_ufld.data.targets import encode_targets, make_row_anchors
 from tac_ufld.data.types import FrameRecord
 from tac_ufld.evaluation.efficiency import measure_efficiency
@@ -87,27 +85,8 @@ class ExperimentRunner:
     def prepare_data(self) -> DataSplits:
         cfg = self.cfg
         self.adapter = build_adapter(cfg)
-        official = self.adapter.official_splits()
         s = cfg.data.split
-        split_info: dict = {"dataset": self.adapter.name, "protocol": dict(self.adapter.protocol)}
-        if official:
-            train, val = official.get("train", []), official.get("val") or []
-            carved = not val
-            if carved:  # no official validation set: carve it from train, never from test
-                train, val = carve_validation(train, s, cfg.min_split_gap())
-            splits = DataSplits(
-                train=cap_records(train, s.max_train_frames, f"{s.split_seed}:cap:train"),
-                val=cap_records(val, s.max_val_frames, f"{s.split_seed}:cap:val"),
-                test=cap_records(official.get("test", []), s.max_test_frames, f"{s.split_seed}:cap:test"),
-            )
-            check_no_leakage(splits, min_gap=cfg.min_split_gap() if carved else None)
-            split_info.update({"split_source": "official", "validation": (
-                f"carved from official train (val_strategy={s.val_strategy})" if carved else "official"),
-                **official_split_report(splits)})
-        else:
-            splits = split_scenes_and_blocks(self.adapter.load_all(), s, cfg.min_split_gap())
-            split_info.update({"split_source": "held-out scenes + temporal blocks",
-                               "test_scenes": list(s.test_scenes), "min_gap_frames": cfg.min_split_gap()})
+        splits, split_info = build_splits(cfg, self.adapter)
         for name in ("train", "val", "test"):
             if not getattr(splits, name):
                 raise RuntimeError(f"split '{name}' is empty - check data.scenes / split.test_scenes")

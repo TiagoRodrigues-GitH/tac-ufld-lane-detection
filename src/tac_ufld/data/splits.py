@@ -231,6 +231,49 @@ def carve_validation(train: list[FrameRecord], cfg: SplitConfig, min_gap: int
     return splits.train, splits.val
 
 
+def build_splits(cfg, adapter) -> tuple[DataSplits, dict]:
+    """The experiment's splits for ``cfg`` (no side effects): official lists
+    (+ carved validation) or held-out scenes + temporal blocks. Returns the
+    splits and a JSON-able description of the protocol used."""
+    s = cfg.data.split
+    info: dict = {"dataset": adapter.name, "protocol": dict(adapter.protocol)}
+    official = adapter.official_splits()
+    if official:
+        train, val = official.get("train", []), official.get("val") or []
+        carved = not val
+        if carved:  # no official validation set: carve it from train, never from test
+            train, val = carve_validation(train, s, cfg.min_split_gap())
+        splits = DataSplits(
+            train=cap_records(train, s.max_train_frames, f"{s.split_seed}:cap:train"),
+            val=cap_records(val, s.max_val_frames, f"{s.split_seed}:cap:val"),
+            test=cap_records(official.get("test", []), s.max_test_frames, f"{s.split_seed}:cap:test"),
+        )
+        check_no_leakage(splits, min_gap=cfg.min_split_gap() if carved else None)
+        info.update({"split_source": "official", "validation": (
+            f"carved from official train (val_strategy={s.val_strategy})" if carved else "official"),
+            **official_split_report(splits)})
+    else:
+        splits = split_scenes_and_blocks(adapter.load_all(), s, cfg.min_split_gap())
+        info.update({"split_source": "held-out scenes + temporal blocks",
+                     "test_scenes": list(s.test_scenes), "min_gap_frames": cfg.min_split_gap()})
+    return splits, info
+
+
+def consecutive_frames(records: list[FrameRecord], n: int, runs: int = 4) -> list[FrameRecord]:
+    """Up to ``n`` records made of ``runs`` runs of consecutive frames from
+    different sequences (for calibration / streaming checks)."""
+    by_seq: dict[str, list[FrameRecord]] = {}
+    for r in sorted(records, key=lambda r: (r.sequence, r.frame_id)):
+        by_seq.setdefault(r.sequence, []).append(r)
+    per_run = max(1, n // max(runs, 1))
+    out: list[FrameRecord] = []
+    for recs in list(by_seq.values())[:: max(1, len(by_seq) // max(runs, 1))]:
+        out.extend(recs[len(recs) // 2: len(recs) // 2 + per_run])
+        if len(out) >= n:
+            break
+    return out[:n]
+
+
 def official_split_report(splits: DataSplits) -> dict[str, object]:
     """Facts about an official split that the leakage checker cannot fix
     (e.g. test clips from the same drives as training clips)."""

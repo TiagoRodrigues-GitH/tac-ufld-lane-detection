@@ -54,7 +54,10 @@ def draw_lanes(img: np.ndarray, lanes, color, thickness: int = 2, points: bool =
 
 
 def put_label(img: np.ndarray, text: str, y: int = 22, scale: float = 0.55) -> np.ndarray:
-    cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 3, cv2.LINE_AA)
+    """White text on a dark box (readable on sky and asphalt alike)."""
+    (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 1)
+    x0, y0, x1, y1 = 4, max(0, y - th - 5), min(img.shape[1], 12 + tw), min(img.shape[0], y + base + 3)
+    img[y0:y1, x0:x1] = (0.35 * img[y0:y1, x0:x1]).astype(img.dtype)
     cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), 1, cv2.LINE_AA)
     return img
 
@@ -125,6 +128,67 @@ def longest_consecutive_run(records: list[FrameRecord], min_length: int = 8) -> 
             if len(run) > len(best):
                 best = list(run)
     return best if len(best) >= min_length else []
+
+
+SLOT_COLORS = [(64, 64, 255), (0, 200, 255), (255, 200, 0), (255, 64, 160)]  # BGR per lane slot
+
+
+def draw_prediction(rgb: np.ndarray, result, title: str = "", gt_lanes=None) -> np.ndarray:
+    """BGR image with the streaming result: one colour per slot, the lane's
+    mean existence probability, history use and latency."""
+    img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    if gt_lanes:
+        draw_lanes(img, gt_lanes, GT_COLOR, 2)
+    for slot, (lane, conf) in enumerate(zip(result.lanes, result.lane_confidence)):
+        if lane is None:
+            continue
+        colour = SLOT_COLORS[slot % len(SLOT_COLORS)]
+        draw_lanes(img, [lane], colour, 3)
+        top = lane[np.argmin(lane[:, 1])]
+        if conf is not None:
+            cv2.putText(img, f"{conf:.2f}", (int(top[0]) - 14, int(top[1]) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        colour, 2, cv2.LINE_AA)
+    lat = result.latency_ms
+    band = img[:52].copy()
+    band[:] = (20, 20, 20)
+    img[:52] = cv2.addWeighted(img[:52], 0.35, band, 0.65, 0)
+    lines = [f"{title}   frame {result.frame_index}   history {result.history_indices}"
+             f"{'   fallback x' + str(result.fallbacks) if result.fallbacks else ''}",
+             f"preprocess {lat.get('preprocess_ms', 0):.1f} ms   model {lat.get('model_ms', 0):.1f} ms   "
+             f"postprocess {lat.get('postprocess_ms', 0):.1f} ms"]
+    for i, text in enumerate(lines):
+        cv2.putText(img, text, (8, 20 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    return img
+
+
+class VideoSink:
+    """Incremental MP4 writer (one frame in memory at a time). OpenCV cannot
+    write to non-ASCII Windows paths, so it writes to the temp folder and
+    moves the file on ``close``."""
+
+    def __init__(self, path: str | Path, fps: float = 10.0) -> None:
+        self.path = Path(path)
+        self.fps = fps
+        self.tmp = Path(tempfile.gettempdir()) / f"tac_ufld_sink_{os.getpid()}_{id(self)}.mp4"
+        self.writer = None
+        self.frames = 0
+
+    def write(self, bgr: np.ndarray) -> None:
+        if self.writer is None:
+            h, w = bgr.shape[:2]
+            self.writer = cv2.VideoWriter(str(self.tmp), cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
+            if not self.writer.isOpened():
+                raise IOError("cannot open an MP4 writer")
+        self.writer.write(bgr)
+        self.frames += 1
+
+    def close(self) -> Path | None:
+        if self.writer is None:
+            return None
+        self.writer.release()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.tmp), str(self.path))
+        return self.path
 
 
 def save_temporal_video(records: list[FrameRecord], lanes_by_label: dict[str, list], out_path: Path,

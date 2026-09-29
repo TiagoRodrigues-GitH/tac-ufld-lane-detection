@@ -1,0 +1,77 @@
+# TAC-UFLD services. Paths come from environment variables (or a .env file
+# next to this file, see .env.example). Datasets are mounted read-only.
+#
+#   docker compose run --rm doctor                  # environment + GPU check
+#   docker compose run --rm tests                   # offline test suite
+#   docker compose run --rm pilot                   # ~2 h GPU pilot (configs/elas_pilot.yaml)
+#   docker compose up ui                            # http://localhost:8501
+#   docker compose --profile cpu run --rm tests-cpu # CPU-only image
+
+x-common: &common
+  build:
+    context: .
+    args:
+      TORCH_INDEX: https://download.pytorch.org/whl/cu126
+  image: tac-ufld:gpu
+  environment:
+    ELAS_ROOT: /data/elas
+    CULANE_ROOT: /data/culane
+    TUSIMPLE_ROOT: /data/tusimple
+    OPENLANE_ROOT: /data/openlane
+    TAC_UFLD_RESULTS: /app/results
+  volumes:
+    - ${ELAS_HOST_DIR:-../../datasets/dataset_elas_v1}:/data/elas:ro
+    - ${CULANE_HOST_DIR:-./.empty}:/data/culane:ro
+    - ${TUSIMPLE_HOST_DIR:-./.empty}:/data/tusimple:ro
+    - ${OPENLANE_HOST_DIR:-./.empty}:/data/openlane:ro
+    - ${RESULTS_HOST_DIR:-./results}:/app/results
+    - torch-cache:/cache/torch
+  shm_size: "4gb"            # DataLoader workers share batches through /dev/shm
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  doctor:
+    <<: *common
+    command: ["python", "-m", "tac_ufld", "doctor"]
+
+  tests:
+    <<: *common
+    command: ["python", "-m", "pytest", "-q", "-m", "not network"]
+
+  smoke:
+    <<: *common
+    command: ["python", "-m", "tac_ufld", "run", "--config", "configs/elas_smoke.yaml"]
+
+  pilot:
+    <<: *common
+    command: ["python", "-m", "tac_ufld", "run", "--config", "configs/elas_pilot.yaml"]
+
+  ui:
+    <<: *common
+    command: ["python", "-m", "streamlit", "run", "src/tac_ufld/ui/app.py", "--server.headless", "true",
+              "--server.address", "0.0.0.0", "--server.port", "8501", "--", "--results", "/app/results"]
+    ports:
+      - "8501:8501"
+
+  tests-cpu:
+    profiles: ["cpu"]
+    build:
+      context: .
+      args:
+        TORCH_INDEX: https://download.pytorch.org/whl/cpu
+    image: tac-ufld:cpu
+    environment:
+      ELAS_ROOT: /data/elas
+    volumes:
+      - ${ELAS_HOST_DIR:-../../datasets/dataset_elas_v1}:/data/elas:ro
+      - torch-cache:/cache/torch
+    command: ["python", "-m", "pytest", "-q", "-m", "not network"]
+
+volumes:
+  torch-cache:
