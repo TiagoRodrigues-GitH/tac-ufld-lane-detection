@@ -1,0 +1,120 @@
+# Full ELAS experiment: UFLD baseline vs temporal variants.
+# Paths are relative to the project root (or absolute). Override the data
+# location with --data-root or the TAC_UFLD_DATA_ROOT environment variable.
+
+name: elas_full
+output_dir: results
+device: auto
+
+data:
+  dataset: elas
+  root: ../../datasets/dataset_elas_v1
+  # The 10-scene plan from the original ELAS script. Add scenes here to use
+  # more of the dataset; scenes absent from scene_tags have no condition
+  # metadata and are excluded from per-condition metrics (not "nominal").
+  scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
+  scene_tags:
+    BR_S01: {transition: true}
+    BR_S02: {transition: true}
+    ROD_S03: {rainy: true}
+    VIX_S03: {occlusion: true, transition: true}
+    VIX_S04: {transition: true}
+    VIX_S05: {occlusion: true}
+    VIX_S07: {shaky: true, transition: true}
+    VIX_S11: {}
+    VV_S03: {transition: true}
+    GRI_S01: {transition: true}
+  img_h: 384            # 640x480 source, aspect preserved
+  img_w: 512
+  num_lanes: 2          # ELAS: ego-left, ego-right
+  num_row_anchors: 18   # as many as official CULane UFLD
+  row_anchor_range: [0.59, 0.995]  # covers every scene ROI (y 285..480 of 480)
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 2      # history = t-2, t-4
+  normalize: imagenet
+  include_frames_without_lanes: false
+  num_workers: 4
+  augmentation:
+    enabled: true
+    prob: 0.8
+    brightness: 0.18
+    contrast: 0.18
+    saturation: 0.15
+    noise_std: 0.015
+    erasing_prob: 0.15
+    erasing_scale: [0.02, 0.08]
+    frame_dropout_prob: 0.10
+  split:
+    split_seed: 2026            # fixed; never tied to the training seed
+    test_scenes: [BR_S02, VIX_S05, VV_S03]   # held out entirely (unseen roads)
+    block_size: 60
+    purge_frames: 10            # >= temporal_step * (num_frames - 1)
+    val_fraction: 0.2
+    seen_test_fraction: 0.15    # secondary test on seen scenes
+    max_train_frames: null
+    max_val_frames: null
+    max_test_frames: null
+    max_seen_test_frames: null
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  backbone: "18"
+  pretrained: true              # ImageNet weights, as in the UFLD paper
+  v04_warm_start: baseline      # "v02" = supervisor's protocol (confounds epochs)
+  lite_history_encoder: shared  # "tiny" = cheaper history encoder
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6]     # >= 6 needed for p < 0.05 with paired Wilcoxon
+  epochs: 50
+  batch_size: 8
+  optimizer: adam               # official UFLD TuSimple recipe: Adam 4e-4, cosine, warm-up
+  lr: 4.0e-4
+  lr_fusion: 5.0e-4
+  weight_decay: 1.0e-4
+  momentum: 0.9
+  scheduler: cos
+  warmup_iters: 100
+  multi_steps: [25, 38]
+  grad_clip_norm: 1.0
+  early_stopping_patience: 10
+  amp: true
+  deterministic: false
+  lambda_temporal: 0.01
+  lambda_coord: 0.35
+  loss:
+    focal_gamma: 2.0
+    sim_loss_w: 0.0
+    shp_loss_w: 0.0
+
+hpo:
+  enabled: true
+  n_trials: 20
+  epochs: 10
+  sampler_seed: 42
+  seed: 42
+  max_train_frames: 2000
+  variants: null                # null = every variant, baselines included
+  load_best_params: null
+  search_space:
+    lr: {low: 1.0e-5, high: 1.0e-3, log: true}
+    weight_decay: {low: 1.0e-6, high: 1.0e-3, log: true}
+    lr_fusion: {low: 1.0e-4, high: 1.0e-3, log: true}
+    lambda_temporal: {low: 0.0, high: 0.05}
+    lambda_coord: {low: 0.05, high: 0.8, variants: [ufld_v04]}
+
+evaluation:
+  iou_thresholds: [0.5, 0.35]   # first = primary (CULane)
+  culane_line_width: 30
+  culane_image_width: 1640
+  anchor_tolerance_px: 10
+  selection_metric: lane_f1_iou50
+  common_postprocess: {threshold: 0.5, min_points: 3, poly_degree: 0, duplicate_distance: 10.0, y_step: 2.0}
+  postprocess_grid:
+    threshold: [0.3, 0.4, 0.5, 0.6, 0.7]
+    min_points: [2, 3, 4]
+    poly_degree: [0, 1, 2]
+  latency_runs: 50
+  n_visual_examples: 12
+  visualize_seeds: 1
+  tensorboard: true

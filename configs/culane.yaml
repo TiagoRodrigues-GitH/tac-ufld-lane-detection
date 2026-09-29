@@ -1,0 +1,38 @@
+# CULane template (adapter ported from the supervisor's notebook, NOT yet
+# validated on real CULane data). Uses the official train/val/test lists.
+# Official UFLD CULane setting: 288x800, 18 row anchors 121..287, 200 cells, 4 lanes.
+
+name: culane
+output_dir: results
+device: auto
+
+data:
+  dataset: culane
+  root: ../../datasets/CULane
+  img_h: 288
+  img_w: 800
+  num_lanes: 4
+  num_row_anchors: 18
+  row_anchor_range: [0.4201, 0.9965]   # 121/287 .. 286/287 of the 288-px height
+  griding_num: 200
+  num_frames: 3
+  temporal_step: 30     # CULane clips store every 30th frame (verify on your copy)
+  num_workers: 4
+  split:
+    purge_frames: 60
+    max_train_frames: null
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6]
+  epochs: 50
+  batch_size: 32
+  optimizer: sgd        # official CULane recipe: SGD 0.1, multi-step [25, 38], warm-up 695
+  lr: 0.1
+  scheduler: multi
+  warmup_iters: 695
+
+hpo:
+  enabled: false

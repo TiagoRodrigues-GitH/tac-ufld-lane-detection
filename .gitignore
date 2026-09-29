@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Data, experiment outputs and model weights (never commit these)
+/results/
+/runs/
+/datasets/
+/data/
+*.pth
+*.pt
+*.db
+*.pkl
+*.mp4
+
+*.log
+
+# Local reference material that is not ours to publish
+reference/supervisor/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

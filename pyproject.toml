@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tac-ufld"
+version = "0.2.0"
+description = "Reproducible UFLD baseline vs temporal lane detection (ELAS, CULane)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10",
+    "matplotlib>=3.7",
+    "optuna>=3.4",
+    "PyYAML>=6",
+    "openpyxl>=3.1",
+    "tensorboard>=2.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+tac-ufld = "tac_ufld.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = [
+    "dataset: needs the local ELAS copy (skipped when absent)",
+    "network: downloads pretrained weights (skipped offline)",
+]

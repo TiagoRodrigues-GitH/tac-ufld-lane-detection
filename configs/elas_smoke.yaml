@@ -1,0 +1,71 @@
+# Smoke test: runs every stage end to end in minutes. Numbers are NOT results.
+
+name: elas_smoke
+output_dir: results
+device: auto
+
+data:
+  dataset: elas
+  root: ../../datasets/dataset_elas_v1
+  scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
+  scene_tags:
+    BR_S01: {transition: true}
+    BR_S02: {transition: true}
+    ROD_S03: {rainy: true}
+    VIX_S03: {occlusion: true, transition: true}
+    VIX_S04: {transition: true}
+    VIX_S05: {occlusion: true}
+    VIX_S07: {shaky: true, transition: true}
+    VIX_S11: {}
+    VV_S03: {transition: true}
+    GRI_S01: {transition: true}
+  img_h: 192
+  img_w: 256
+  num_lanes: 2
+  num_row_anchors: 18
+  row_anchor_range: [0.59, 0.995]
+  griding_num: 50
+  num_frames: 3
+  temporal_step: 2
+  normalize: imagenet
+  num_workers: 0
+  split:
+    split_seed: 2026
+    test_scenes: [BR_S02, VIX_S05, VV_S03]
+    block_size: 60
+    purge_frames: 10
+    val_fraction: 0.2
+    seen_test_fraction: 0.15
+    max_train_frames: 160
+    max_val_frames: 48
+    max_test_frames: 64
+    max_seen_test_frames: 32
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  pretrained: false
+
+train:
+  seeds: [1, 2]
+  epochs: 2
+  batch_size: 8
+  early_stopping_patience: 0
+
+hpo:
+  enabled: true
+  n_trials: 2
+  epochs: 1
+  max_train_frames: 64
+  search_space:
+    lr: {low: 1.0e-5, high: 1.0e-3, log: true}
+    lambda_temporal: {low: 0.0, high: 0.05}
+    lambda_coord: {low: 0.05, high: 0.8, variants: [ufld_v04]}
+
+evaluation:
+  postprocess_grid:
+    threshold: [0.3, 0.5]
+    min_points: [3]
+    poly_degree: [0, 1]
+  latency_runs: 5
+  n_visual_examples: 3
+  tensorboard: false
