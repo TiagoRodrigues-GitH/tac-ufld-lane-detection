@@ -6,7 +6,7 @@ device: auto
 
 data:
   dataset: elas
-  root: ../../datasets/dataset_elas_v1
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
   scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
   scene_tags:
     BR_S01: {transition: true}

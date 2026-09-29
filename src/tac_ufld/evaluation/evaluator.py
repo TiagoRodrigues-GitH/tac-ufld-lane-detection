@@ -11,6 +11,7 @@ import pandas as pd
 from tac_ufld.config import ExperimentConfig
 from tac_ufld.data.targets import LaneTargets, encode_targets
 from tac_ufld.data.types import FrameRecord
+from tac_ufld.evaluation.native import native_metrics
 from tac_ufld.evaluation.predictor import Predictions
 from tac_ufld.metrics import (
     AnchorCounts, anchor_counts, culane_line_width, f_beta, iou_matrix, lane_mask,
@@ -122,6 +123,7 @@ class Evaluator:
             metrics.update({"pixel_precision": p, "pixel_recall": r, "pixel_f1": f1})
             metrics.update(anchors.as_metrics())
             metrics.update(temporal_jitter(jitter_items, params.threshold))
+            metrics.update(native_metrics(records, all_lanes))
         if preds.loss is not None:
             metrics["focal_loss"] = preds.loss
         weights = preds.current_weight[np.isfinite(preds.current_weight)]

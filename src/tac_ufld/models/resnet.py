@@ -45,15 +45,18 @@ class BasicBlock(nn.Module):
 
 
 class ResNetBackbone(nn.Module):
-    """Returns (layer2, layer3, layer4) features like the official UFLD wrapper."""
+    """Returns (layer2, layer3, layer4) features like the official UFLD wrapper.
+    ``in_channels != 3`` (preprocessing ablations) changes only ``conv1``;
+    ImageNet weights are then adapted by ``adapt_conv1``."""
 
     out_channels = 512
 
-    def __init__(self, depth: str = "18", pretrained: bool = True) -> None:
+    def __init__(self, depth: str = "18", pretrained: bool = True, in_channels: int = 3) -> None:
         super().__init__()
         if depth not in _LAYERS:
             raise ValueError(f"unsupported ResNet depth '{depth}' (supported: {sorted(_LAYERS)})")
-        self.conv1 = nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False)
+        self.in_channels = in_channels
+        self.conv1 = nn.Conv2d(in_channels, 64, 7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
@@ -85,6 +88,25 @@ class ResNetBackbone(nn.Module):
         return x2, x3, x4
 
 
+def adapt_conv1(weight: torch.Tensor, in_channels: int) -> torch.Tensor:
+    """Adapt ImageNet ``conv1`` weights (64, 3, 7, 7) to ``in_channels`` inputs.
+
+    * 1 channel: sum over RGB, so a grey image gives the same response as the
+      same grey image replicated to RGB (the standard adaptation);
+    * > 3 channels: RGB weights kept, each extra channel initialised with the
+      mean RGB filter (RGB + edge input);
+    * 2 channels: not a supported representation.
+    """
+    if in_channels == 3:
+        return weight
+    if in_channels == 1:
+        return weight.sum(dim=1, keepdim=True)
+    if in_channels > 3:
+        extra = weight.mean(dim=1, keepdim=True).repeat(1, in_channels - 3, 1, 1)
+        return torch.cat([weight, extra], dim=1)
+    raise ValueError(f"cannot adapt ImageNet conv1 to {in_channels} input channels")
+
+
 def load_imagenet_weights(module: ResNetBackbone, depth: str) -> None:
     """Download (cached under ~/.cache/torch/hub) and load torchvision's
     ImageNet-1k weights; the classifier head (``fc``) is dropped."""
@@ -96,4 +118,5 @@ def load_imagenet_weights(module: ResNetBackbone, depth: str) -> None:
             f"Connect to the internet once, or set model.pretrained: false."
         ) from exc
     state = {k: v for k, v in state.items() if not k.startswith("fc.")}
+    state["conv1.weight"] = adapt_conv1(state["conv1.weight"], module.in_channels)
     module.load_state_dict(state, strict=True)

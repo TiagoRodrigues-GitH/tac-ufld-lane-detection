@@ -46,15 +46,18 @@ class UFLDNet(nn.Module):
     def __init__(
         self, num_lanes: int, num_row_anchors: int, griding_num: int,
         img_h: int, img_w: int, backbone: str = "18", pretrained: bool = True,
+        in_channels: int = 3, head_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.cls_dim = (griding_num + 1, num_row_anchors, num_lanes)
-        self.model = ResNetBackbone(backbone, pretrained=pretrained)
+        self.model = ResNetBackbone(backbone, pretrained=pretrained, in_channels=in_channels)
         self.pool = nn.Conv2d(ResNetBackbone.out_channels, 8, 1)
         self.flat_dim = 8 * math.ceil(img_h / 32) * math.ceil(img_w / 32)
         self.cls = nn.Sequential(
             nn.Linear(self.flat_dim, 2048), nn.ReLU(), nn.Linear(2048, math.prod(self.cls_dim))
         )
+        # Optional, parameter-free: keeps the official state-dict layout (cls.0 / cls.2).
+        self.head_dropout = nn.Dropout(head_dropout) if head_dropout > 0 else nn.Identity()
         _official_init(self.cls)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -62,7 +65,8 @@ class UFLDNet(nn.Module):
 
     def classify(self, features: torch.Tensor) -> torch.Tensor:
         flat = self.pool(features).flatten(1)
-        return self.cls(flat).view(-1, *self.cls_dim)
+        hidden = self.head_dropout(self.cls[1](self.cls[0](flat)))
+        return self.cls[2](hidden).view(-1, *self.cls_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classify(self.encode(x))
@@ -77,6 +81,12 @@ class UFLDSingleFrame(nn.Module):
     def __init__(self, ufld: UFLDNet) -> None:
         super().__init__()
         self.ufld = ufld
+
+    def encode_frames(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"current": self.ufld.encode(x)}
+
+    def forward_features(self, history: list[torch.Tensor], current: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"logits": self.ufld.classify(current)}
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         if x.dim() == 5:
@@ -128,7 +138,13 @@ class GatedTemporalFusion(nn.Module):
 
 class UFLDTemporal(nn.Module):
     """Shared-backbone temporal UFLD: encode every frame with ``ufld.model``,
-    fuse, classify with the UFLD head."""
+    fuse, classify with the UFLD head.
+
+    Streaming: in eval mode every frame's feature map depends on that frame
+    only (shared backbone, BatchNorm running statistics, no dropout), so the
+    history features can be cached and reused exactly. ``encode_frames``
+    returns the cacheable per-frame features; ``forward_features`` runs the
+    fusion and the head on (history..., current) features."""
 
     temporal = True
 
@@ -136,6 +152,17 @@ class UFLDTemporal(nn.Module):
         super().__init__()
         self.ufld = ufld
         self.fusion = fusion
+
+    def encode_frames(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        """(B, C, H, W) -> per-frame features, used both as current and history."""
+        feats = self.ufld.encode(x)
+        return {"current": feats, "history": feats}
+
+    def forward_features(self, history: list[torch.Tensor], current: torch.Tensor) -> dict[str, torch.Tensor]:
+        """``history`` ordered oldest -> newest, each (B, C', h, w)."""
+        feats = torch.stack([*history, current], dim=1)
+        fused, extra = self.fusion(feats)
+        return {"logits": self.ufld.classify(fused), **extra}
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, t, c, h, w = x.shape

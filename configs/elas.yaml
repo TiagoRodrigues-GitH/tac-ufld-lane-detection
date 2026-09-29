@@ -5,10 +5,11 @@
 name: elas_full
 output_dir: results
 device: auto
+requires_confirmation: true   # several GPU-days: `run` needs --confirm
 
 data:
   dataset: elas
-  root: ../../datasets/dataset_elas_v1
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
   # The 10-scene plan from the original ELAS script. Add scenes here to use
   # more of the dataset; scenes absent from scene_tags have no condition
   # metadata and are excluded from per-condition metrics (not "nominal").

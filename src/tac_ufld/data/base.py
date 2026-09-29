@@ -13,10 +13,20 @@ class LaneDatasetAdapter(ABC):
 
     Adapters only parse and index; they never resize images, build targets or
     split data, so every dataset shares the same downstream code.
+
+    Class attributes describing the dataset's conventions:
+
+    * ``num_lanes`` - fixed lane slots of the internal representation;
+    * ``flip_permutation`` - slot order after a horizontal flip (left <-> right),
+      or ``None`` when flipping would break the label semantics;
+    * ``protocol`` - the dataset-specific split / evaluation protocol, written
+      into every report so results from different datasets are never mixed.
     """
 
     name: str = "base"
     num_lanes: int = 0
+    flip_permutation: tuple[int, ...] | None = None
+    protocol: dict[str, str] = {}
 
     @abstractmethod
     def sequences(self) -> list[str]:
@@ -31,8 +41,10 @@ class LaneDatasetAdapter(ABC):
         """Image path of any frame (annotated or not) used as temporal context."""
 
     def official_splits(self) -> dict[str, list[FrameRecord]] | None:
-        """Datasets with an official split (CULane) override this. ``None``
-        means the scene/temporal-block split protocol is used instead."""
+        """Datasets with an official split override this. ``None`` means the
+        scene/temporal-block split protocol is used instead. A missing or
+        empty ``val`` entry means validation is carved from ``train``
+        (``data.split.val_strategy``) without touching ``test``."""
         return None
 
     def load_all(self) -> dict[str, list[FrameRecord]]:

@@ -56,6 +56,57 @@ def export_lines_txt(records, lanes_per_record, out_dir: Path) -> int:
     return count
 
 
+def _flatten(d: dict, prefix: str = "") -> dict:
+    out = {}
+    for key, value in d.items():
+        name = f"{prefix}{key}"
+        if isinstance(value, dict) and value and all(isinstance(k, str) for k in value) and key != "scene_tags":
+            out.update(_flatten(value, name + "."))
+        else:
+            out[name] = value
+    return out
+
+
+def config_diff(cfg) -> dict[str, dict]:
+    """Every resolved setting that differs from the package defaults, so the
+    report states exactly which protocol was used."""
+    from tac_ufld.config import ExperimentConfig
+
+    now, ref = _flatten(cfg.to_dict()), _flatten(ExperimentConfig().to_dict())
+    return {k: {"default": ref.get(k), "value": v} for k, v in sorted(now.items()) if ref.get(k) != v}
+
+
+def protocol_section(cfg, split_info: dict, best_params: dict, variants: list[str], changes: dict) -> list[str]:
+    """Markdown describing the protocol actually used (split, selection,
+    tuning budget, training controls, augmentation, preprocessing)."""
+    t, a, g, p, e = cfg.train, cfg.data.augmentation, cfg.data.augmentation.geometric, \
+        cfg.data.preprocessing, cfg.evaluation
+    geo = ("off" if not (a.enabled and g.enabled) else
+           f"p={g.prob}, translate=({g.translate_x}, {g.translate_y}), scale={g.scale}, rotate=±{g.rotate_deg}°, "
+           f"perspective={g.perspective}, crop={g.crop_scale}, hflip={g.hflip_prob}")
+    extra_photo = {k: getattr(a, k) for k in ("gamma", "hue", "blur_prob", "motion_blur_prob", "shadow_prob")
+                   if getattr(a, k)}
+    protocol = split_info.get("protocol", {})
+    lines = ["\n## Protocol\n",
+             f"* Dataset: `{cfg.data.dataset}`; split source: {split_info.get('split_source', 'n/a')}; "
+             f"validation: {split_info.get('validation', 'blocks within the non-test scenes')}.",
+             f"* Dataset protocol: {protocol.get('split', 'n/a')}. Native metric: {protocol.get('native_metric', 'n/a')}.",
+             f"* Selection metric (checkpoints, early stopping, HPO, post-processing sweep): "
+             f"`{e.selection_metric}` on validation only; test is evaluated once at the end.",
+             f"* Training: {t.optimizer} lr={t.lr} (fusion {t.lr_fusion}), weight decay={t.weight_decay}, "
+             f"scheduler={t.scheduler} (warm-up {t.warmup_iters} it), grad clip={t.grad_clip_norm}, "
+             f"early stopping patience={t.early_stopping_patience}, epochs<={t.epochs}, AMP={t.amp}, "
+             f"label smoothing={t.loss.label_smoothing}, head dropout={cfg.model.head_dropout}.",
+             f"* HPO: {'on' if cfg.hpo.enabled else 'off'} ({cfg.hpo.n_trials} trials x {cfg.hpo.epochs} epochs "
+             f"per variant, same budget for baselines); tuned: "
+             f"{ {v: best_params.get(v) for v in variants if best_params.get(v)} or 'none'}.",
+             f"* Photometric augmentation: {'on' if a.enabled else 'off'} (p={a.prob}; extra: {extra_photo or 'none'}); "
+             f"geometric: {geo}.",
+             f"* Input representation: `{p.mode}` (pre-ops {p.pre_ops or 'none'}), {cfg.in_channels} channel(s).",
+             f"* Settings that differ from the package defaults: {len(changes)} (see `config_changes.json`)."]
+    return lines
+
+
 def summary_table(agg: pd.DataFrame, metrics: list[str], labels: dict[str, str]) -> pd.DataFrame:
     """Wide table: one row per variant, 'mean ± std' per metric."""
     rows = []

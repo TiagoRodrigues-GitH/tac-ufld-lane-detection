@@ -18,12 +18,24 @@ Protocol for datasets without an official split (ELAS):
 
 The split never depends on the training seed: every seed and every model
 sees exactly the same frames. ``check_no_leakage`` enforces all of this.
+
+Datasets with an official split (CULane, TuSimple, OpenLane) keep it. When
+the official split has no validation set, ``carve_validation`` takes one
+from the official training split only (the official test set is never
+touched): temporal blocks + purge gap (``val_strategy: blocks``) or whole
+sequences (``val_strategy: sequences``).
+
+Grouping and ordering: blocks and purge gaps are computed per *split group*
+along a *split order*. By default these are the sequence and the frame id
+(ELAS). An adapter can override them per record with
+``meta["split_group"]`` / ``meta["split_order"]`` (TuSimple: drive and
+clip rank, so neighbouring 1-s clips of one drive never straddle splits).
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -36,6 +48,14 @@ SPLIT_NAMES = ("train", "val", "test", "seen_test")
 
 class LeakageError(RuntimeError):
     """Raised when two splits share frames, scenes or temporal neighbourhoods."""
+
+
+def split_group(record: FrameRecord) -> str:
+    return str(record.meta.get("split_group", record.sequence)) if record.meta else record.sequence
+
+
+def split_order(record: FrameRecord) -> int:
+    return int(record.meta.get("split_order", record.frame_id)) if record.meta else record.frame_id
 
 
 @dataclass
@@ -123,13 +143,14 @@ def split_scenes_and_blocks(
         raise ValueError(f"split.test_scenes not found in loaded scenes: {unknown}")
     out: dict[str, list[FrameRecord]] = {name: [] for name in SPLIT_NAMES}
     for scene in sorted(records_by_seq):
-        recs = sorted(records_by_seq[scene], key=lambda r: r.frame_id)
+        recs = sorted(records_by_seq[scene], key=split_order)
         if scene in cfg.test_scenes:
             out["test"].extend(recs)
             continue
-        block_label = _assign_blocks([r.frame_id for r in recs], cfg, scene)
-        fids = np.asarray([r.frame_id for r in recs])
-        labels = np.asarray([block_label[r.frame_id // cfg.block_size] for r in recs])
+        orders = [split_order(r) for r in recs]
+        block_label = _assign_blocks(orders, cfg, scene)
+        fids = np.asarray(orders)
+        labels = np.asarray([block_label[o // cfg.block_size] for o in orders])
         keep = _purge(fids, labels, min_gap)
         for rec, label, k in zip(recs, labels, keep):
             if k:
@@ -157,7 +178,7 @@ def check_no_leakage(
             seen[r.key] = name
     held_out = set(held_out_sequences or [])
     for name in ("train", "val", "seen_test"):
-        bad = held_out & {r.sequence for r in groups[name]}
+        bad = held_out & {split_group(r) for r in groups[name]}
         if bad:
             raise LeakageError(f"held-out test scene(s) {sorted(bad)} appear in '{name}'")
     if min_gap is None:
@@ -165,12 +186,59 @@ def check_no_leakage(
     for a, b in (("train", "val"), ("train", "seen_test"), ("val", "seen_test")):
         by_seq: dict[str, list[int]] = {}
         for r in groups[b]:
-            by_seq.setdefault(r.sequence, []).append(r.frame_id)
+            by_seq.setdefault(split_group(r), []).append(split_order(r))
         ref = {seq: np.sort(np.asarray(ids)) for seq, ids in by_seq.items()}
         for r in groups[a]:
-            if r.sequence in ref:
-                d = _distance_to_nearest(np.asarray([r.frame_id]), ref[r.sequence])[0]
+            group = split_group(r)
+            if group in ref:
+                d = _distance_to_nearest(np.asarray([split_order(r)]), ref[group])[0]
                 if d <= min_gap:
                     raise LeakageError(
                         f"{r.key} ('{a}') is only {int(d)} frames from a '{b}' frame (min gap {min_gap})"
                     )
+
+
+def group_records(records: list[FrameRecord]) -> dict[str, list[FrameRecord]]:
+    out: dict[str, list[FrameRecord]] = {}
+    for r in records:
+        out.setdefault(split_group(r), []).append(r)
+    return out
+
+
+def carve_validation(train: list[FrameRecord], cfg: SplitConfig, min_gap: int
+                     ) -> tuple[list[FrameRecord], list[FrameRecord]]:
+    """Split an official training set into train/val without touching test.
+
+    * ``blocks``: temporal blocks of ``block_size`` along the split order of
+      each split group, ``val_fraction`` of the blocks to val, purge gap
+      ``min_gap`` (the ELAS rule, without held-out scenes or seen_test).
+    * ``sequences``: whole split groups (e.g. OpenLane segments) to val.
+    """
+    if not train:
+        return [], []
+    if cfg.val_strategy == "sequences":
+        groups = sorted(group_records(train))
+        order = groups[:]
+        random.Random(f"{cfg.split_seed}:val_groups").shuffle(order)
+        n_val = max(1, int(round(len(order) * cfg.val_fraction))) if len(order) > 1 else 0
+        val_groups = set(order[:n_val])
+        new_train = [r for r in train if split_group(r) not in val_groups]
+        val = [r for r in train if split_group(r) in val_groups]
+        return new_train, val
+    carve_cfg = replace(cfg, test_scenes=[], seen_test_fraction=0.0, max_train_frames=None,
+                        max_val_frames=None, max_test_frames=None, max_seen_test_frames=None)
+    splits = split_scenes_and_blocks(group_records(train), carve_cfg, min_gap)
+    return splits.train, splits.val
+
+
+def official_split_report(splits: DataSplits) -> dict[str, object]:
+    """Facts about an official split that the leakage checker cannot fix
+    (e.g. test clips from the same drives as training clips)."""
+    groups = {name: {split_group(r) for r in recs} for name, recs in splits.as_dict().items() if recs}
+    report: dict[str, object] = {name: {"frames": len(getattr(splits, name)), "groups": len(g)}
+                                 for name, g in groups.items()}
+    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+        if a in groups and b in groups:
+            shared = sorted(groups[a] & groups[b])
+            report[f"shared_groups_{a}_{b}"] = {"count": len(shared), "examples": shared[:10]}
+    return report

@@ -111,22 +111,25 @@ def build_model(key: str, cfg: ExperimentConfig, pretrained: bool | None = None)
     )
 
     spec = resolve_spec(key, cfg)
-    d = cfg.data
+    d, m = cfg.data, cfg.model
+    in_channels = cfg.in_channels
     if pretrained is None:
-        pretrained = cfg.model.pretrained and spec.warm_start is None
+        pretrained = m.pretrained and spec.warm_start is None
     if spec.family == "ufld":
         ufld = UFLDNet(d.num_lanes, d.num_row_anchors, d.griding_num, d.img_h, d.img_w,
-                       backbone=cfg.model.backbone, pretrained=pretrained)
+                       backbone=m.backbone, pretrained=pretrained, in_channels=in_channels,
+                       head_dropout=m.head_dropout)
         if not spec.temporal:
             return UFLDSingleFrame(ufld)
         fusion = (GatedTemporalFusion(512, d.num_frames) if key == "ufld_v03"
                   else TemporalWeightedFusion(d.num_frames))
         return UFLDTemporal(ufld, fusion)
-    backbone = LightweightBackbone(3, 128)
-    head = LanePixelHead(128, d.num_lanes, d.num_row_anchors, d.griding_num)
+    backbone = LightweightBackbone(in_channels, 128, dropout=m.lite_dropout)
+    head = LanePixelHead(128, d.num_lanes, d.num_row_anchors, d.griding_num, dropout=m.lite_head_dropout)
     if not spec.temporal:
         return LiteSingleFrame(backbone, head)
-    return LiteWarpTemporal(backbone, head, d.num_frames, history_encoder=cfg.model.lite_history_encoder)
+    return LiteWarpTemporal(backbone, head, d.num_frames, history_encoder=m.lite_history_encoder,
+                            in_channels=in_channels, dropout=m.lite_dropout)
 
 
 def warm_start(target: nn.Module, source_state: dict) -> list[str]:

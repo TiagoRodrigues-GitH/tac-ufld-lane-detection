@@ -174,6 +174,16 @@ def discover_scenes(root: Path) -> dict[str, _ScenePaths]:
 class ElasAdapter(LaneDatasetAdapter):
     name = "elas"
     num_lanes = 2
+    flip_permutation = (1, 0)  # ego-left <-> ego-right
+    protocol = {
+        "split": "no official split: held-out test scenes + seed-independent 60-frame blocks "
+                 "with purge gap on the other scenes (data.split)",
+        "test": "held-out scenes (primary) and seen-scene blocks (secondary)",
+        "primary_metric": "lane_f1_iou50: CULane-style lane F1, 30 px width scaled to the image "
+                          "(12 px at 640), Hungarian matching, IoU >= 0.5, within the scene ROI",
+        "native_metric": "none (ELAS has no official lane-detection benchmark)",
+        "annotation": "p1..p4 at 0, 1/4, 1/2, 1 of the ROI height; slots 0 = ego-left, 1 = ego-right",
+    }
 
     def __init__(
         self,

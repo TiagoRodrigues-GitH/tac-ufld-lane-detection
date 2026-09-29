@@ -124,6 +124,12 @@ class LiteSingleFrame(nn.Module):
         super().__init__()
         self.backbone, self.head = backbone, head
 
+    def encode_frames(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"current": self.backbone(x)}
+
+    def forward_features(self, history: list[torch.Tensor], current: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"logits": self.head(current)}
+
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         if x.dim() == 5:
             x = x[:, -1]
@@ -188,15 +194,31 @@ class ResidualTemporalFusion(nn.Module):
 
 
 class LiteWarpTemporal(nn.Module):
+    """Streaming: the warp and the gate depend on the current frame and are
+    recomputed every step; the per-frame history features (backbone or tiny
+    encoder output) depend on their own frame only and are cached."""
+
     temporal = True
 
     def __init__(self, backbone: LightweightBackbone, head: LanePixelHead, num_frames: int,
-                 history_encoder: str = "shared") -> None:
+                 history_encoder: str = "shared", in_channels: int = 3, dropout: float = 0.05) -> None:
         super().__init__()
         self.backbone, self.head = backbone, head
         channels = backbone.out_channels
-        self.history_encoder = TinyHistoryEncoder(out_channels=channels) if history_encoder == "tiny" else None
+        self.history_encoder = (TinyHistoryEncoder(in_channels, channels, dropout=dropout)
+                                if history_encoder == "tiny" else None)
         self.fusion = ResidualTemporalFusion(channels, num_frames, hidden=64, max_disp=8.0)
+
+    def encode_frames(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        current = self.backbone(x)
+        history = current if self.history_encoder is None else self.history_encoder(x)
+        return {"current": current, "history": history}
+
+    def forward_features(self, history: list[torch.Tensor], current: torch.Tensor) -> dict[str, torch.Tensor]:
+        if not history:
+            return {"logits": self.head(current)}
+        fused, gate, flows = self.fusion(torch.stack([*history, current], dim=1))
+        return {"logits": self.head(fused), "gate": gate, "flows": flows}
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, t, c, h, w = x.shape

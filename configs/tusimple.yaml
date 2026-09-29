@@ -1,0 +1,44 @@
+# TuSimple template (adapter checked with synthetic fixtures only; run
+# `python -m tac_ufld validate-dataset --dataset tusimple` on the real data).
+# Official UFLD TuSimple setting: 288x800, 56 row anchors 64..284 (= h_samples
+# 160..710 at 720 px), 100 cells, 4 lanes, Adam 4e-4, cosine, 100 epochs.
+
+name: tusimple
+output_dir: results
+device: auto
+requires_confirmation: true
+
+data:
+  dataset: tusimple
+  root: "${TUSIMPLE_ROOT}"
+  img_h: 288
+  img_w: 800
+  num_lanes: 4
+  num_row_anchors: 56
+  row_anchor_range: [0.22300, 0.98955]   # 64/287 .. 284/287 -> anchors 64, 68, ..., 284
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 2      # frames 20, 18, 16 of each 20-frame clip (20 fps)
+  num_workers: 4
+  split:
+    split_seed: 2026
+    val_strategy: blocks  # temporal blocks of consecutive clips per drive
+    block_size: 20        # clips per block
+    purge_frames: 4       # clips purged around val blocks (>= temporal span in frames)
+    val_fraction: 0.1
+    seen_test_fraction: 0.0
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6]
+  epochs: 100
+  batch_size: 32
+  optimizer: adam
+  lr: 4.0e-4
+  scheduler: cos
+  warmup_iters: 100
+
+hpo:
+  enabled: false

@@ -131,13 +131,35 @@ class Trainer:
                 sums[k] = sums.get(k, 0.0) + v * bs
         return {f"train_{k}": v / max(n_seen, 1) for k, v in sums.items()}
 
-    def fit(self, checkpoint_path: Path | None = None, extra_meta: dict | None = None) -> TrainResult:
+    def fit(self, checkpoint_path: Path | None = None, extra_meta: dict | None = None,
+            resume: bool = False) -> TrainResult:
+        """Train, keeping the best validation state. With ``train.save_last``
+        the full training state is written to ``<checkpoint>.last.pt`` after
+        every epoch; ``resume=True`` continues from it (same optimizer,
+        scheduler, AMP scaler, RNG and data-order state)."""
         optimizer = self._optimizer()
         scheduler = self._scheduler(optimizer)
         scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
         history, best_state = [], None
         best_score, best_loss, best_epoch, stale = -np.inf, np.inf, 0, 0
-        for epoch in range(1, self.epochs + 1):
+        start_epoch = 1
+        last_path = None
+        if checkpoint_path is not None and self.cfg.train.save_last:
+            last_path = checkpoint_path.with_name(checkpoint_path.stem + ".last.pt")
+        if resume and last_path is not None and last_path.exists():
+            state = torch.load(last_path, map_location="cpu", weights_only=False)
+            self.model.load_state_dict(state["model"])
+            optimizer.load_state_dict(state["optimizer"])
+            scheduler.load_state_dict(state["scheduler"])
+            scaler.load_state_dict(state["scaler"])
+            history, best_state = state["history"], state["best_state"]
+            best_score, best_loss, best_epoch, stale = state["best"]
+            start_epoch = state["epoch"] + 1
+            _restore_rng(state["rng"], self.train_loader)
+            LOGGER.info("[%s] resumed from %s after epoch %d", self.tag, last_path.name, state["epoch"])
+        for epoch in range(start_epoch, self.epochs + 1):
+            if self.patience > 0 and stale >= self.patience:
+                break  # the resumed run had already stopped early
             start = time.time()
             row = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"]}
             row.update(self._train_epoch(optimizer, scheduler, scaler))
@@ -165,6 +187,12 @@ class Trainer:
                 f"  [{row['flags']}]" if row["flags"] else "",
             )
             self._log_tensorboard(row, epoch)
+            if last_path is not None:
+                _atomic_save({"model": self.model.state_dict(), "optimizer": optimizer.state_dict(),
+                              "scheduler": scheduler.state_dict(), "scaler": scaler.state_dict(),
+                              "history": history, "best_state": best_state,
+                              "best": (best_score, best_loss, best_epoch, stale), "epoch": epoch,
+                              "rng": _capture_rng(self.train_loader)}, last_path)
             if self.trial is not None:
                 import optuna
 
@@ -181,10 +209,9 @@ class Trainer:
     # --------------------------------------------------------------- helpers
 
     def _save(self, path: Path, state: dict, epoch: int, score: float, extra: dict | None) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"state_dict": state, "variant": self.spec.key, "epoch": epoch,
-                    "selection_metric": self.selection, "score": score,
-                    "hyperparams": self.hp.as_dict(), **(extra or {})}, path)
+        _atomic_save({"state_dict": state, "variant": self.spec.key, "epoch": epoch,
+                      "selection_metric": self.selection, "score": score,
+                      "hyperparams": self.hp.as_dict(), **(extra or {})}, path)
 
     @staticmethod
     def _diagnose(prev: dict | None, row: dict) -> str:
@@ -210,3 +237,35 @@ def load_checkpoint(path: Path, model: nn.Module, device: str = "cpu") -> dict:
     payload = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(payload["state_dict"], strict=True)
     return payload
+
+
+def _atomic_save(payload: dict, path: Path) -> None:
+    """Write to a temporary file, then rename: an interruption never leaves a
+    truncated checkpoint behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def _capture_rng(loader: DataLoader) -> dict:
+    import random
+
+    state = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    if loader.generator is not None:
+        state["loader"] = loader.generator.get_state()
+    return state
+
+
+def _restore_rng(state: dict, loader: DataLoader) -> None:
+    import random
+
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"])
+    if "cuda" in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["cuda"])
+    if "loader" in state and loader.generator is not None:
+        loader.generator.set_state(state["loader"])

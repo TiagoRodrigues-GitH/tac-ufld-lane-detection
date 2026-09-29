@@ -1,0 +1,36 @@
+# Dataset registry. Only ENABLED datasets can be selected or scanned; a
+# disabled dataset's root is never read. Roots accept ${VAR} and
+# ${VAR:-default}; relative paths are relative to the project root.
+# An enabled dataset whose root is unset or missing stops the run with an
+# explicit error.
+#
+#   python -m tac_ufld datasets                 # list + status
+#   python -m tac_ufld datasets --check         # parse every enabled dataset
+#   python -m tac_ufld run --dataset elas --config configs/elas_pilot.yaml
+#   python -m tac_ufld validate-dataset --dataset culane
+
+datasets:
+  elas:
+    enabled: true
+    root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
+    config: configs/elas.yaml
+    smoke_config: configs/elas_smoke.yaml
+    description: "ELAS (Berriel et al. 2017), 2 ego lanes, reference dataset"
+
+  culane:
+    enabled: false
+    root: "${CULANE_ROOT}"
+    config: configs/culane.yaml
+    description: "CULane (Pan et al. 2018), 4 lanes, official lists"
+
+  tusimple:
+    enabled: false
+    root: "${TUSIMPLE_ROOT}"
+    config: configs/tusimple.yaml
+    description: "TuSimple lane benchmark, 4 lanes, 20-frame clips"
+
+  openlane:
+    enabled: false
+    root: "${OPENLANE_ROOT}"
+    config: configs/openlane.yaml
+    description: "OpenLane v1 (2D lanes), 4 attribute slots, Waymo segments"

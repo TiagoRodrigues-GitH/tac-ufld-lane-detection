@@ -26,14 +26,24 @@ from tac_ufld.decoding import exist_logits, expected_x
 from tac_ufld.models.registry import VariantSpec
 
 
-def softmax_focal_loss(logits: torch.Tensor, target: torch.Tensor, gamma: float = 2.0) -> torch.Tensor:
-    """Official SoftmaxFocalLoss: NLL of (1 - p)^gamma * log p over G+1 classes."""
-    if not (target != IGNORE_INDEX).any():
+def softmax_focal_loss(logits: torch.Tensor, target: torch.Tensor, gamma: float = 2.0,
+                       label_smoothing: float = 0.0) -> torch.Tensor:
+    """Official SoftmaxFocalLoss: NLL of (1 - p)^gamma * log p over G+1 classes.
+
+    ``label_smoothing`` = eps mixes in a uniform target over the G+1 classes:
+    (1 - eps) * focal NLL + eps * mean_c[-(1 - p_c)^gamma log p_c]. With
+    eps = 0 the result is exactly the official loss."""
+    valid = target != IGNORE_INDEX
+    if not valid.any():
         return logits.sum() * 0.0
     logits = logits.float()
     log_p = F.log_softmax(logits, dim=1)
-    factor = torch.pow(1.0 - log_p.exp(), gamma)
-    return F.nll_loss(factor * log_p, target, ignore_index=IGNORE_INDEX)
+    weighted = torch.pow(1.0 - log_p.exp(), gamma) * log_p
+    nll = F.nll_loss(weighted, target, ignore_index=IGNORE_INDEX)
+    if label_smoothing <= 0:
+        return nll
+    uniform = -weighted.mean(dim=1)[valid].mean()
+    return (1.0 - label_smoothing) * nll + label_smoothing * uniform
 
 
 def parsing_relation_loss(logits: torch.Tensor) -> torch.Tensor:
@@ -123,7 +133,7 @@ class VariantLoss:
     def __call__(self, model: nn.Module, outputs: dict, batch: dict,
                  include_temporal: bool = True) -> tuple[torch.Tensor, dict[str, float]]:
         logits, target, valid = outputs["logits"], batch["cls"], batch["valid"]
-        focal = softmax_focal_loss(logits, target, self.cfg.focal_gamma)
+        focal = softmax_focal_loss(logits, target, self.cfg.focal_gamma, self.cfg.label_smoothing)
         total = focal
         logs = {"focal": focal.detach()}
         if self.cfg.sim_loss_w:

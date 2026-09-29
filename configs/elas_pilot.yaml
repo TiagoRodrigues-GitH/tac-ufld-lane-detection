@@ -1,0 +1,73 @@
+# GPU pilot run: the full ELAS protocol (same data, split, resolution,
+# ImageNet initialisation, warm starts, validation-only selection, held-out
+# test) with a SHORT budget, to check that every model learns and that the
+# pipeline produces sensible numbers before the supervisor's full run.
+#
+# Budget (RTX 3050 6 GB): ~2 h (sized from a measured per-epoch timing probe). Differences from
+# configs/elas.yaml: 2 seeds instead of 6, <= 4 epochs (patience 2)
+# instead of <= 50 (patience 10), no HPO (config defaults for every model),
+# smaller post-processing grid. Results are INDICATIVE ONLY: 2 seeds cannot
+# reach significance (reported as `underpowered`) and short training favours
+# faster-converging models.
+#
+#   python -m tac_ufld run --config configs/elas_pilot.yaml
+
+name: elas_pilot
+output_dir: results
+device: auto
+description: "GPU pilot: full ELAS protocol, 2 seeds, <= 4 epochs, no HPO. Indicative only."
+
+data:
+  dataset: elas
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
+  scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
+  scene_tags:
+    BR_S01: {transition: true}
+    BR_S02: {transition: true}
+    ROD_S03: {rainy: true}
+    VIX_S03: {occlusion: true, transition: true}
+    VIX_S04: {transition: true}
+    VIX_S05: {occlusion: true}
+    VIX_S07: {shaky: true, transition: true}
+    VIX_S11: {}
+    VV_S03: {transition: true}
+    GRI_S01: {transition: true}
+  img_h: 384
+  img_w: 512
+  num_lanes: 2
+  num_row_anchors: 18
+  row_anchor_range: [0.59, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 2
+  normalize: imagenet
+  num_workers: 4
+  split:
+    split_seed: 2026
+    test_scenes: [BR_S02, VIX_S05, VV_S03]
+    block_size: 60
+    purge_frames: 10
+    val_fraction: 0.2
+    seen_test_fraction: 0.15
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  pretrained: true
+
+train:
+  seeds: [1, 2]
+  epochs: 4
+  early_stopping_patience: 2
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid:
+    threshold: [0.4, 0.5, 0.6]
+    min_points: [2, 3]
+    poly_degree: [0, 1]
+  latency_runs: 30
+  n_visual_examples: 8
+  visualize_seeds: 1
+  tensorboard: true

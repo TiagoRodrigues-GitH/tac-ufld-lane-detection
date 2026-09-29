@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import typing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,9 +23,27 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT_ENV = "TAC_UFLD_DATA_ROOT"
 
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
 
 class ConfigError(ValueError):
     """Raised for malformed or inconsistent configuration."""
+
+
+def expand_env(value: str, context: str = "") -> str:
+    """Expand ``${VAR}`` and ``${VAR:-default}``. An unset variable without a
+    default is an error (never a silent empty path)."""
+
+    def repl(match: re.Match) -> str:
+        name, default = match.group(1), match.group(2)
+        if name in os.environ and os.environ[name] != "":
+            return os.environ[name]
+        if default is not None:
+            return default
+        where = f" (in {context})" if context else ""
+        raise ConfigError(f"environment variable {name} is not set{where}")
+
+    return _ENV_PATTERN.sub(repl, value)
 
 
 # ----------------------------------------------------------------------------
@@ -33,8 +52,33 @@ class ConfigError(ValueError):
 
 
 @dataclass
+class GeometricAugConfig:
+    """Geometric augmentation. Every transform is one homography applied to
+    all frames of a clip AND to the lane polylines, so labels stay aligned.
+    Disabled by default (baseline reproducibility)."""
+
+    enabled: bool = False
+    prob: float = 0.5
+    translate_x: float = 0.0      # max |shift| as a fraction of the width
+    translate_y: float = 0.0      # max |shift| as a fraction of the height
+    scale: list[float] = field(default_factory=lambda: [1.0, 1.0])   # isotropic zoom range
+    rotate_deg: float = 0.0       # max |rotation| about the image centre
+    perspective: float = 0.0      # max corner displacement as a fraction of the size
+    crop_scale: list[float] = field(default_factory=lambda: [1.0, 1.0])  # crop side fraction, resized back
+    hflip_prob: float = 0.0       # needs a dataset slot permutation (left <-> right)
+    # A row may be labelled "no lane" only if at least this fraction of its
+    # visible content comes from the annotated band (ELAS ROI); otherwise the
+    # row is ignored. 1.0 = strict.
+    min_row_valid: float = 1.0
+    border: str = "constant"      # constant (black) | replicate | reflect
+
+
+@dataclass
 class AugmentationConfig:
-    """Photometric augmentation applied identically to every frame of a clip."""
+    """Photometric augmentation applied identically to every frame of a clip.
+    Fields up to ``frame_dropout_prob`` are the original (ELAS script)
+    augmentation; the later photometric options are off by default so the
+    random stream, and therefore every existing run, is unchanged."""
 
     enabled: bool = True
     prob: float = 0.8
@@ -45,6 +89,46 @@ class AugmentationConfig:
     erasing_prob: float = 0.15
     erasing_scale: list[float] = field(default_factory=lambda: [0.02, 0.08])
     frame_dropout_prob: float = 0.10
+    gamma: float = 0.0            # gamma sampled log-uniformly in [1/(1+g), 1+g]
+    hue: float = 0.0              # max hue rotation as a fraction of 360 degrees
+    blur_prob: float = 0.0
+    blur_sigma: list[float] = field(default_factory=lambda: [0.3, 1.5])
+    motion_blur_prob: float = 0.0
+    motion_blur_kernel: list[int] = field(default_factory=lambda: [3, 9])
+    shadow_prob: float = 0.0
+    shadow_strength: list[float] = field(default_factory=lambda: [0.3, 0.7])
+    geometric: GeometricAugConfig = field(default_factory=GeometricAugConfig)
+
+
+PREPROCESS_MODES = ("rgb", "gray", "gray3", "edge", "canny", "hough", "rgb_edge")
+PRE_OPS = ("blur", "clahe", "equalize")
+
+
+@dataclass
+class PreprocessConfig:
+    """Input representation (preprocessing ablations). ``rgb`` is the
+    original behaviour. The same object is used for training, evaluation,
+    streaming inference and deployment (it is stored in every checkpoint)."""
+
+    mode: str = "rgb"             # see PREPROCESS_MODES
+    pre_ops: list[str] = field(default_factory=list)  # applied in this order before the mode
+    blur_ksize: int = 5
+    clahe_clip: float = 2.0
+    clahe_tile: int = 8
+    sobel_ksize: int = 3
+    edge_normalization: str = "max"   # max (per image) | fixed
+    edge_clip: float = 1.0            # 'fixed': magnitude / edge_clip, clipped to [0, 1]
+    canny_low: int = 50
+    canny_high: int = 150
+    canny_l2: bool = True
+    hough_threshold: int = 30
+    hough_min_line_length: int = 20
+    hough_max_line_gap: int = 10
+    hough_thickness: int = 2
+    hough_min_angle_deg: float = 15.0  # drop near-horizontal segments (not lane-like)
+    edge_source: str = "sobel"        # rgb_edge: sobel | canny
+    feature_mean: float = 0.5         # normalisation of edge/canny/hough channels
+    feature_std: float = 0.5
 
 
 @dataclass
@@ -61,6 +145,11 @@ class SplitConfig:
     max_val_frames: int | None = None
     max_test_frames: int | None = None
     max_seen_test_frames: int | None = None
+    # Only for datasets whose official split has no validation set (TuSimple,
+    # OpenLane): how validation is carved from the official training split.
+    # "blocks" = temporal blocks within each split group + purge gap;
+    # "sequences" = whole sequences held out.
+    val_strategy: str = "blocks"
 
 
 @dataclass
@@ -81,6 +170,7 @@ class DataConfig:
     include_frames_without_lanes: bool = False
     num_workers: int = 2
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
+    preprocessing: PreprocessConfig = field(default_factory=PreprocessConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
 
 
@@ -101,6 +191,12 @@ class ModelConfig:
     # current frame (isolates the fusion effect). "tiny": the cheaper
     # depthwise-separable history encoder from the original ELAS script.
     lite_history_encoder: str = "shared"
+    # Optional dropout before the last Linear of the UFLD head (0 = official
+    # UFLD, no dropout). Parameter-free, so state dicts are unchanged.
+    head_dropout: float = 0.0
+    # Dropout of the lite models (values of the original ELAS script).
+    lite_dropout: float = 0.05
+    lite_head_dropout: float = 0.15
 
 
 @dataclass
@@ -108,6 +204,8 @@ class LossConfig:
     focal_gamma: float = 2.0
     sim_loss_w: float = 0.0   # official UFLD CULane config value
     shp_loss_w: float = 0.0   # official UFLD CULane config value
+    # Uniform label smoothing of the focal classification term (0 = official).
+    label_smoothing: float = 0.0
 
 
 @dataclass
@@ -130,6 +228,9 @@ class TrainConfig:
     lambda_temporal: float = 0.01
     lambda_coord: float = 0.35
     loss: LossConfig = field(default_factory=LossConfig)
+    # Write <variant>.last.pt every epoch so an interrupted run continues
+    # mid-training with --resume (optimizer, scheduler, RNG and history).
+    save_last: bool = True
 
 
 @dataclass
@@ -191,6 +292,10 @@ class ExperimentConfig:
     name: str = "elas_experiment"
     output_dir: str = "results"
     device: str = "auto"
+    description: str = ""
+    # Long (multi-day) configurations set this; `run` then refuses to start
+    # without --confirm, so a full experiment is never launched by accident.
+    requires_confirmation: bool = False
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -207,10 +312,18 @@ class ExperimentConfig:
         return "cuda" if torch.cuda.is_available() else "cpu"
 
     def data_root(self) -> Path:
-        """Dataset root: env override, absolute path, or relative to the project root."""
+        """Dataset root: env override, absolute path, or relative to the project
+        root. ``${VAR}`` / ``${VAR:-default}`` in ``data.root`` are expanded."""
         override = os.environ.get(DATA_ROOT_ENV)
-        root = Path(override) if override else Path(self.data.root)
+        root = Path(override) if override else Path(expand_env(self.data.root, "data.root"))
         return root if root.is_absolute() else (PROJECT_ROOT / root).resolve()
+
+    @property
+    def in_channels(self) -> int:
+        """Model input channels implied by the preprocessing mode."""
+        from tac_ufld.data.preprocess import channels_for_mode  # local import avoids a cycle
+
+        return channels_for_mode(self.data.preprocessing.mode)
 
     def output_root(self) -> Path:
         out = Path(self.output_dir)
@@ -269,6 +382,82 @@ class ExperimentConfig:
         for name in self.hpo.search_space:
             if name not in ("lr", "lr_fusion", "weight_decay", "lambda_temporal", "lambda_coord"):
                 raise ConfigError(f"unsupported HPO parameter '{name}'")
+        from tac_ufld.data import KNOWN_DATASETS  # local import avoids a cycle
+
+        if d.dataset.lower() not in KNOWN_DATASETS:
+            raise ConfigError(f"data.dataset '{d.dataset}' unknown; supported: {list(KNOWN_DATASETS)}")
+        if s.val_strategy not in ("blocks", "sequences"):
+            raise ConfigError("data.split.val_strategy must be 'blocks' or 'sequences'")
+        self._validate_preprocessing()
+        self._validate_augmentation()
+        m = self.model
+        for name in ("head_dropout", "lite_dropout", "lite_head_dropout"):
+            if not 0 <= getattr(m, name) < 1:
+                raise ConfigError(f"model.{name} must be in [0, 1)")
+        if not 0 <= t.loss.label_smoothing < 1:
+            raise ConfigError("train.loss.label_smoothing must be in [0, 1)")
+        lane_metrics = ("lane_f1_", "lane_f2_", "lane_precision_", "lane_recall_")
+        if not e.selection_metric.startswith(lane_metrics):
+            raise ConfigError(
+                f"evaluation.selection_metric '{e.selection_metric}' must be a lane-level metric "
+                f"(lane_f1_iouXX, lane_f2_..., ...): the post-processing sweep only computes those"
+            )
+        tags = {f"iou{int(round(th * 100)):02d}" for th in e.iou_thresholds}
+        if e.selection_metric.rsplit("_", 1)[-1] not in tags:
+            raise ConfigError(
+                f"evaluation.selection_metric '{e.selection_metric}' uses an IoU threshold that is "
+                f"not in evaluation.iou_thresholds {e.iou_thresholds}"
+            )
+
+    def _validate_preprocessing(self) -> None:
+        p = self.data.preprocessing
+        if p.mode not in PREPROCESS_MODES:
+            raise ConfigError(f"data.preprocessing.mode must be one of {PREPROCESS_MODES}")
+        bad = [op for op in p.pre_ops if op not in PRE_OPS]
+        if bad:
+            raise ConfigError(f"unknown data.preprocessing.pre_ops {bad}; supported: {PRE_OPS}")
+        if p.blur_ksize % 2 == 0 or p.blur_ksize < 1:
+            raise ConfigError("data.preprocessing.blur_ksize must be an odd positive integer")
+        if p.sobel_ksize not in (1, 3, 5, 7):
+            raise ConfigError("data.preprocessing.sobel_ksize must be 1, 3, 5 or 7")
+        if p.edge_normalization not in ("max", "fixed") or p.edge_clip <= 0:
+            raise ConfigError("data.preprocessing.edge_normalization must be max|fixed, edge_clip > 0")
+        if not 0 <= p.canny_low <= p.canny_high:
+            raise ConfigError("data.preprocessing requires 0 <= canny_low <= canny_high")
+        if p.edge_source not in ("sobel", "canny"):
+            raise ConfigError("data.preprocessing.edge_source must be sobel|canny")
+        if p.feature_std <= 0:
+            raise ConfigError("data.preprocessing.feature_std must be > 0")
+
+    def _validate_augmentation(self) -> None:
+        a = self.data.augmentation
+        g = a.geometric
+        for name in ("prob", "erasing_prob", "frame_dropout_prob", "blur_prob", "motion_blur_prob", "shadow_prob"):
+            if not 0 <= getattr(a, name) <= 1:
+                raise ConfigError(f"data.augmentation.{name} must be in [0, 1]")
+        if a.gamma < 0 or not 0 <= a.hue <= 0.5:
+            raise ConfigError("data.augmentation.gamma must be >= 0 and hue in [0, 0.5]")
+        for name in ("blur_sigma", "motion_blur_kernel", "shadow_strength", "erasing_scale"):
+            lo, hi = getattr(a, name)
+            if lo > hi or lo < 0:
+                raise ConfigError(f"data.augmentation.{name} must be [low, high] with 0 <= low <= high")
+        if not 0 <= g.prob <= 1 or not 0 <= g.hflip_prob <= 1:
+            raise ConfigError("data.augmentation.geometric probabilities must be in [0, 1]")
+        if not 0 <= g.translate_x < 0.5 or not 0 <= g.translate_y < 0.5:
+            raise ConfigError("data.augmentation.geometric.translate_* must be in [0, 0.5)")
+        if not 0 <= g.rotate_deg <= 30:
+            raise ConfigError("data.augmentation.geometric.rotate_deg must be in [0, 30] (small rotations)")
+        if not 0 <= g.perspective < 0.25:
+            raise ConfigError("data.augmentation.geometric.perspective must be in [0, 0.25)")
+        for name in ("scale", "crop_scale"):
+            lo, hi = getattr(g, name)
+            if not 0 < lo <= hi or (name == "crop_scale" and hi > 1):
+                raise ConfigError(f"data.augmentation.geometric.{name} must be [low, high], 0 < low <= high"
+                                  + (" <= 1" if name == "crop_scale" else ""))
+        if not 0 < g.min_row_valid <= 1:
+            raise ConfigError("data.augmentation.geometric.min_row_valid must be in (0, 1]")
+        if g.border not in ("constant", "replicate", "reflect"):
+            raise ConfigError("data.augmentation.geometric.border must be constant|replicate|reflect")
 
 
 # ----------------------------------------------------------------------------

@@ -1,0 +1,42 @@
+# OpenLane (v1, 2D lanes) template. Adapter checked with synthetic fixtures
+# only; run `python -m tac_ufld validate-dataset --dataset openlane` first.
+# There is no official UFLD OpenLane setting; these values are a starting
+# point (1920x1280 source -> 320x480 keeps the 1.5 aspect ratio).
+
+name: openlane
+output_dir: results
+device: auto
+requires_confirmation: true
+
+data:
+  dataset: openlane
+  root: "${OPENLANE_ROOT}"
+  img_h: 320
+  img_w: 480
+  num_lanes: 4          # attribute slots: left-left, left, right, right-right
+  num_row_anchors: 36
+  row_anchor_range: [0.40, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1      # 10 Hz: history = t-0.1 s, t-0.2 s
+  num_workers: 4
+  split:
+    split_seed: 2026
+    val_strategy: sequences   # whole training segments held out for validation
+    purge_frames: 2
+    val_fraction: 0.1
+    seen_test_fraction: 0.0
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6]
+  epochs: 30
+  batch_size: 16
+  optimizer: adam
+  lr: 4.0e-4
+  scheduler: cos
+
+hpo:
+  enabled: false

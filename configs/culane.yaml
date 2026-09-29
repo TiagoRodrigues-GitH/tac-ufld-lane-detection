@@ -1,14 +1,17 @@
-# CULane template (adapter ported from the supervisor's notebook, NOT yet
-# validated on real CULane data). Uses the official train/val/test lists.
+# CULane template (adapter ported from the supervisor's notebook; checked
+# against the CULane layout with synthetic fixtures, NOT yet run on real
+# CULane data - run `python -m tac_ufld validate-dataset --dataset culane`).
+# Uses the official train/val/test lists.
 # Official UFLD CULane setting: 288x800, 18 row anchors 121..287, 200 cells, 4 lanes.
 
 name: culane
 output_dir: results
 device: auto
+requires_confirmation: true   # multi-day run
 
 data:
   dataset: culane
-  root: ../../datasets/CULane
+  root: "${CULANE_ROOT}"
   img_h: 288
   img_w: 800
   num_lanes: 4
@@ -16,10 +19,14 @@ data:
   row_anchor_range: [0.4201, 0.9965]   # 121/287 .. 286/287 of the 288-px height
   griding_num: 200
   num_frames: 3
-  temporal_step: 30     # CULane clips store every 30th frame (verify on your copy)
+  # Frame ids are video-frame numbers; clips store every 30th frame
+  # (*_30frame drivers) or every 90th (*_90frame drivers). 90 = the
+  # supervisor's notebook value (3 s at 30 fps) and exists in both folder
+  # types; 30 would find no history in the 90-frame drivers.
+  temporal_step: 90
   num_workers: 4
   split:
-    purge_frames: 60
+    purge_frames: 180   # >= temporal_step * (num_frames - 1); official lists are used
     max_train_frames: null
 
 model:

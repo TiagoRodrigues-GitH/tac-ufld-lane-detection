@@ -64,6 +64,42 @@ def environment_info() -> dict[str, str]:
     return info
 
 
+def ascii_safe_path(path: str | Path) -> str:
+    """A path OpenCV's video/image functions can open on Windows, where they
+    fail on non-ASCII characters (e.g. ``Residência``): the 8.3 short name
+    when available, otherwise the path unchanged."""
+    text = str(path)
+    if os.name != "nt" or text.isascii():
+        return text
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetShortPathNameW(text, buf, len(buf))
+    return buf.value if n and buf.value.isascii() else text
+
+
+def open_video(path: str | Path):
+    """``cv2.VideoCapture`` that also works for non-ASCII Windows paths
+    (short path, or a temporary ASCII-named copy as a last resort)."""
+    import shutil
+    import tempfile
+
+    import cv2
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    cap = cv2.VideoCapture(ascii_safe_path(path))
+    if cap.isOpened():
+        return cap
+    tmp = Path(tempfile.gettempdir()) / f"tac_ufld_video_{os.getpid()}{path.suffix}"
+    shutil.copyfile(path, tmp)
+    cap = cv2.VideoCapture(str(tmp))
+    if not cap.isOpened():
+        raise IOError(f"OpenCV cannot open video {path}")
+    return cap
+
+
 def write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")

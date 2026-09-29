@@ -32,17 +32,22 @@ from tac_ufld import __version__
 from tac_ufld.config import ExperimentConfig, save_config
 from tac_ufld.data import build_adapter
 from tac_ufld.data.dataset import TemporalLaneDataset
-from tac_ufld.data.splits import DataSplits, cap_records, check_no_leakage, split_scenes_and_blocks
+from tac_ufld.data.splits import (
+    DataSplits, cap_records, carve_validation, check_no_leakage, official_split_report, split_scenes_and_blocks,
+)
 from tac_ufld.data.targets import encode_targets, make_row_anchors
 from tac_ufld.data.types import FrameRecord
 from tac_ufld.evaluation.efficiency import measure_efficiency
 from tac_ufld.evaluation.evaluator import Evaluator, iou_tag
 from tac_ufld.evaluation.predictor import predict
 from tac_ufld.evaluation.stats import aggregate, paired_comparisons
+from tac_ufld.inference.card import model_card
 from tac_ufld.losses import Hyperparams
 from tac_ufld.models.registry import VARIANTS, build_model, resolve_spec, training_order, warm_start
 from tac_ufld.postprocess import PostprocessParams
-from tac_ufld.reporting import export_lines_txt, markdown_table, summary_table, write_excel
+from tac_ufld.reporting import (
+    config_diff, export_lines_txt, markdown_table, protocol_section, summary_table, write_excel,
+)
 from tac_ufld.training.hpo import active_space, run_study
 from tac_ufld.training.trainer import Trainer, TrainResult, load_checkpoint
 from tac_ufld.utils import environment_info, read_json, seed_worker, set_seed, setup_logging, write_json
@@ -52,10 +57,15 @@ LOGGER = logging.getLogger(__name__)
 EVAL_SPLITS = ("test", "seen_test")
 
 
+class FullRunNotConfirmed(RuntimeError):
+    """A configuration marked ``requires_confirmation`` was started without confirmation."""
+
+
 class ExperimentRunner:
     def __init__(self, cfg: ExperimentConfig, variants: list[str] | None = None,
-                 seeds: list[int] | None = None, resume: bool = False) -> None:
+                 seeds: list[int] | None = None, resume: bool = False, confirmed: bool = False) -> None:
         self.cfg = cfg
+        self.confirmed = confirmed
         self.out = cfg.output_root()
         self.out.mkdir(parents=True, exist_ok=True)
         setup_logging(self.out / "run.log")
@@ -79,15 +89,25 @@ class ExperimentRunner:
         self.adapter = build_adapter(cfg)
         official = self.adapter.official_splits()
         s = cfg.data.split
+        split_info: dict = {"dataset": self.adapter.name, "protocol": dict(self.adapter.protocol)}
         if official:
+            train, val = official.get("train", []), official.get("val") or []
+            carved = not val
+            if carved:  # no official validation set: carve it from train, never from test
+                train, val = carve_validation(train, s, cfg.min_split_gap())
             splits = DataSplits(
-                train=cap_records(official.get("train", []), s.max_train_frames, f"{s.split_seed}:cap:train"),
-                val=cap_records(official.get("val", []), s.max_val_frames, f"{s.split_seed}:cap:val"),
+                train=cap_records(train, s.max_train_frames, f"{s.split_seed}:cap:train"),
+                val=cap_records(val, s.max_val_frames, f"{s.split_seed}:cap:val"),
                 test=cap_records(official.get("test", []), s.max_test_frames, f"{s.split_seed}:cap:test"),
             )
-            check_no_leakage(splits)
+            check_no_leakage(splits, min_gap=cfg.min_split_gap() if carved else None)
+            split_info.update({"split_source": "official", "validation": (
+                f"carved from official train (val_strategy={s.val_strategy})" if carved else "official"),
+                **official_split_report(splits)})
         else:
             splits = split_scenes_and_blocks(self.adapter.load_all(), s, cfg.min_split_gap())
+            split_info.update({"split_source": "held-out scenes + temporal blocks",
+                               "test_scenes": list(s.test_scenes), "min_gap_frames": cfg.min_split_gap()})
         for name in ("train", "val", "test"):
             if not getattr(splits, name):
                 raise RuntimeError(f"split '{name}' is empty - check data.scenes / split.test_scenes")
@@ -95,6 +115,7 @@ class ExperimentRunner:
         data_dir.mkdir(parents=True, exist_ok=True)
         splits.manifest().to_csv(data_dir / "split_manifest.csv", index=False)
         splits.summary().to_csv(data_dir / "split_summary.csv", index=False)
+        write_json(data_dir / "split_report.json", split_info)
         if getattr(self.adapter, "stats", None):
             pd.DataFrame(self.adapter.stats).T.rename_axis("sequence").to_csv(data_dir / "dataset_stats.csv")
         LOGGER.info("splits: %s (min gap %d frames, held-out test scenes %s)",
@@ -120,17 +141,22 @@ class ExperimentRunner:
             drop_last=shuffle and len(dataset) > self.cfg.train.batch_size,
         )
 
-    def check_labels(self, per_sequence: int = 2) -> pd.DataFrame:
-        """Label-check overlays + straight-line residual of the 4 ELAS points."""
+    def check_labels(self, per_sequence: int = 2, max_sequences: int = 40) -> pd.DataFrame:
+        """Label-check overlays + straight-line residual of the 4 ELAS points.
+        Overlays are drawn for at most ``max_sequences`` evenly spaced
+        sequences (CULane/TuSimple have thousands of clips)."""
         d = self.cfg.data
         by_seq: dict[str, list[FrameRecord]] = {}
         for recs in self.splits.as_dict().values():
             for r in recs:
                 by_seq.setdefault(r.sequence, []).append(r)
+        names = sorted(by_seq)
+        overlay_seqs = {names[int(i)] for i in np.linspace(0, len(names) - 1, min(max_sequences, len(names)))}
         chosen, rows = [], []
         for seq, recs in sorted(by_seq.items()):
             recs.sort(key=lambda r: r.frame_id)
-            chosen += [recs[int(i)] for i in np.linspace(0, len(recs) - 1, min(per_sequence, len(recs)))]
+            if seq in overlay_seqs:
+                chosen += [recs[int(i)] for i in np.linspace(0, len(recs) - 1, min(per_sequence, len(recs)))]
             residuals = []
             for r in recs:
                 for lane in r.present_lanes():
@@ -177,7 +203,8 @@ class ExperimentRunner:
 
     def train_variant(self, variant: str, seed: int, hp: Hyperparams, epochs: int, patience: int,
                       warm_from: Path | None, checkpoint: Path | None, train_records=None,
-                      trial=None, writer=None, tag: str = "") -> tuple[torch.nn.Module, TrainResult]:
+                      trial=None, writer=None, tag: str = "", resume: bool = False
+                      ) -> tuple[torch.nn.Module, TrainResult]:
         set_seed(seed, self.cfg.train.deterministic)
         spec = resolve_spec(variant, self.cfg)
         frames = self._frames(variant)
@@ -191,8 +218,12 @@ class ExperimentRunner:
             evaluator=self.evaluator, epochs=epochs, patience=patience,
             writer=writer, trial=trial, tag=tag or f"{variant} s{seed}",
         )
-        result = trainer.fit(checkpoint, extra_meta={"seed": seed, "config_hash": self.cfg.config_hash(),
-                                                     "version": __version__})
+        # The checkpoint is self-describing: the resolved config rebuilds the
+        # exact architecture and the card fixes the input/output conventions
+        # used by streaming inference, ONNX export and the UI.
+        meta = {"seed": seed, "config_hash": self.cfg.config_hash(), "version": __version__,
+                "config": self.cfg.to_dict(), "card": model_card(self.cfg, variant)}
+        result = trainer.fit(checkpoint, extra_meta=meta, resume=resume)
         return model, result
 
     # =================================================================== HPO
@@ -216,7 +247,11 @@ class ExperimentRunner:
         for variant in self.variants:
             spec = resolve_spec(variant, cfg)
             space = active_space(h.search_space, variant, spec.temporal)
-            if variant in targets and space:
+            study_file = hpo_dir / f"{variant}_best.json"
+            if variant in targets and space and self.resume and study_file.exists():
+                self.best_params[variant] = read_json(study_file)["params"]
+                LOGGER.info("resume: reusing finished HPO study %s", study_file.name)
+            elif variant in targets and space:
                 def objective(hp: Hyperparams, trial, _v=variant, _spec=spec) -> float:
                     model, result = self.train_variant(
                         _v, h.seed, hp, h.epochs, patience=0, warm_from=references.get(_spec.warm_start),
@@ -231,12 +266,16 @@ class ExperimentRunner:
             dependants = [v for v in targets if resolve_spec(v, cfg).warm_start == variant]
             if dependants:  # train this variant once to warm-start the dependants' trials
                 ref_path = hpo_dir / "references" / f"{variant}.pt"
-                model, _ = self.train_variant(variant, h.seed, self.hyperparams(variant), h.epochs, 0,
-                                              references.get(spec.warm_start), ref_path, train_records=subset,
-                                              tag=f"hpo reference {variant}")
+                done = ref_path.with_suffix(".done")
+                if not (self.resume and ref_path.exists() and done.exists()):
+                    model, _ = self.train_variant(variant, h.seed, self.hyperparams(variant), h.epochs, 0,
+                                                  references.get(spec.warm_start), ref_path, train_records=subset,
+                                                  tag=f"hpo reference {variant}")
+                    done.write_text("complete\n", encoding="utf-8")
+                    ref_path.with_name(ref_path.stem + ".last.pt").unlink(missing_ok=True)
+                    del model
+                    self._free()
                 references[variant] = ref_path
-                del model
-                self._free()
         write_json(hpo_dir / "best_params.json", self.best_params)
         return self.best_params
 
@@ -258,15 +297,19 @@ class ExperimentRunner:
         try:
             for variant in self.variants:
                 ckpt = seed_dir / "checkpoints" / f"{variant}.pt"
+                history_csv = seed_dir / f"history_{variant}.csv"
                 checkpoints[variant] = ckpt
-                if self.resume and ckpt.exists():
+                # The best checkpoint is written during training, so it alone
+                # does not prove that training finished: the history CSV does.
+                if self.resume and ckpt.exists() and history_csv.exists():
                     LOGGER.info("resume: %s seed %d already trained", variant, seed)
                     continue
                 spec = resolve_spec(variant, cfg)
                 model, result = self.train_variant(
                     variant, seed, self.hyperparams(variant), cfg.train.epochs, cfg.train.early_stopping_patience,
-                    checkpoints.get(spec.warm_start), ckpt, writer=writer)
-                result.history.to_csv(seed_dir / f"history_{variant}.csv", index=False)
+                    checkpoints.get(spec.warm_start), ckpt, writer=writer, resume=self.resume)
+                result.history.to_csv(history_csv, index=False)
+                ckpt.with_name(ckpt.stem + ".last.pt").unlink(missing_ok=True)  # large; training is complete
                 plots.plot_history(result.history, self.labels[variant], cfg.evaluation.selection_metric,
                                    seed_dir / "plots" / f"history_{variant}")
                 del model
@@ -293,6 +336,8 @@ class ExperimentRunner:
             val_preds = predict(model, self.loader(val_ds, False), self.device, cfg.data.img_w, cfg.train.amp)
             tuned, sweep = self.evaluator.sweep(val_preds, val_ds.records, cfg.evaluation.postprocess_grid, common)
             sweep.to_csv(seed_dir / "postprocess" / f"{variant}_val_sweep.csv", index=False)
+            write_json(seed_dir / "postprocess" / f"{variant}_tuned.json",
+                       {"params": tuned.as_dict(), "selected_on": "val", "metric": cfg.evaluation.selection_metric})
             protocols = {"tuned": tuned, "common": common}
             for split in EVAL_SPLITS:
                 if not self.splits.as_dict()[split]:
@@ -339,7 +384,8 @@ class ExperimentRunner:
         for variant in self.variants:
             model = build_model(variant, self.cfg, pretrained=False).to(self.device)
             rows.append({"variant": variant, **measure_efficiency(
-                model, self._frames(variant), d.img_h, d.img_w, self.device, self.cfg.evaluation.latency_runs)})
+                model, self._frames(variant), d.img_h, d.img_w, self.device, self.cfg.evaluation.latency_runs,
+                in_channels=self.cfg.in_channels)})
             del model
             self._free()
         return pd.DataFrame(rows)
@@ -357,8 +403,14 @@ class ExperimentRunner:
         sheets, md = {}, [f"# Experiment report: {cfg.name}\n",
                           f"Config hash `{cfg.config_hash()}`, package {__version__}, seeds {self.seeds}, "
                           f"device {self.device}.\n",
-                          "Primary metric: lane F1 at IoU 0.5 (CULane protocol, width scaled to image), "
-                          "held-out test scenes, validation-tuned post-processing.\n"]
+                          f"Primary metric: `{cfg.evaluation.selection_metric}` (CULane-style lane F1, width "
+                          "scaled to the image), test split, validation-tuned post-processing.\n"]
+        split_info = read_json(self.out / "data" / "split_report.json") \
+            if (self.out / "data" / "split_report.json").exists() else {}
+        changes = config_diff(cfg)
+        write_json(rep / "config_changes.json", changes)
+        md += protocol_section(cfg, split_info, self.best_params, self.variants, changes)
+        native_cols = sorted(c for c in results.columns if c.startswith("native_") and c != "native_frames")
         for split in EVAL_SPLITS:
             for protocol in ("tuned", "common"):
                 sub = results[(results["split"] == split) & (results["protocol"] == protocol)
@@ -371,6 +423,12 @@ class ExperimentRunner:
                 sheets[f"agg_{name}"] = agg
                 md += [f"\n## {split} split, {protocol} post-processing (mean ± std over seeds)\n",
                        markdown_table(summary_table(agg, main_metrics[:6] + ["jitter_px"], self.labels))]
+                if native_cols:
+                    native = aggregate(sub, native_cols)
+                    native.to_csv(rep / f"aggregate_native_{name}.csv", index=False)
+                    sheets[f"native_{name}"] = native
+                    md += [f"\n### Dataset-native metrics ({split}, {protocol}); not comparable across datasets\n",
+                           markdown_table(summary_table(native, native_cols, self.labels))]
                 if split == "test" and protocol == "tuned":
                     plots.plot_metric_bars(agg, main_metrics[:6], self.labels, rep / "test_metrics",
                                            "Held-out test scenes (validation-tuned post-processing)")
@@ -416,6 +474,12 @@ class ExperimentRunner:
 
     def run(self) -> Path:
         cfg = self.cfg
+        if cfg.requires_confirmation and not self.confirmed:
+            raise FullRunNotConfirmed(
+                f"'{cfg.name}' is marked requires_confirmation (a long, full experiment: "
+                f"{len(self.variants)} variants x {len(self.seeds)} seeds x up to {cfg.train.epochs} epochs"
+                f"{', HPO ' + str(cfg.hpo.n_trials) + ' trials/variant' if cfg.hpo.enabled else ''}). "
+                f"Re-run with --confirm to start it.")
         save_config(cfg, self.out / "config_resolved.yaml")
         write_json(self.out / "environment.json", {**environment_info(), "config_hash": cfg.config_hash(),
                                                   "version": __version__, "variants": self.variants,

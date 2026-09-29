@@ -39,12 +39,12 @@ def count_macs(model: nn.Module, dummy: torch.Tensor) -> int:
 
 @torch.no_grad()
 def measure_efficiency(model: nn.Module, num_frames: int, img_h: int, img_w: int,
-                       device: str, runs: int = 50, warmup: int = 10) -> dict[str, float]:
+                       device: str, runs: int = 50, warmup: int = 10, in_channels: int = 3) -> dict[str, float]:
     """Batch-1 latency on ``device``. Temporal models re-encode every history
     frame per call, so this is an upper bound for a streaming deployment that
-    caches history features."""
+    caches history features (see ``tac_ufld.inference.streaming``)."""
     model.eval()
-    dummy = torch.randn(1, num_frames, 3, img_h, img_w, device=device)
+    dummy = torch.randn(1, num_frames, in_channels, img_h, img_w, device=device)
     macs = count_macs(model, dummy)
     for _ in range(warmup):
         model(dummy)
