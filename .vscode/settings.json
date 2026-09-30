@@ -1,0 +1,8 @@
+{
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestArgs": ["tests", "-q"],
+  "python.analysis.extraPaths": ["src"],
+  "files.exclude": {"**/__pycache__": true, "**/.pytest_cache": true},
+  "search.exclude": {"results": true, "site": true, "dist": true, ".venv": true}
+}

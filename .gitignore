@@ -28,7 +28,10 @@ env/
 reference/supervisor/
 
 # Editors / OS
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 Thumbs.db
 .DS_Store

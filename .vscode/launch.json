@@ -1,0 +1,61 @@
+{
+  // Ready-made runs (Run and Debug panel). Select the project's .venv as the
+  // Python interpreter first. Long runs (pilot, full experiment) are better
+  // started from the terminal; see README.md.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "1. Environment check (doctor)",
+      "type": "debugpy", "request": "launch", "module": "tac_ufld",
+      "args": ["doctor"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "2. ELAS smoke test (~10 min, numbers meaningless)",
+      "type": "debugpy", "request": "launch", "module": "tac_ufld",
+      "args": ["run", "--config", "configs/elas_smoke.yaml"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "3. Smoke test on every dataset (synthetic copies when absent)",
+      "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/scripts/smoke_datasets.py",
+      "args": ["--device", "cpu"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "4. Check a downloaded dataset",
+      "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/scripts/check_dataset.py",
+      "args": ["${input:dataset}", "${input:datasetRoot}"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "5. GPU pilot with the v0.4 models (~5 h on an RTX 3050)",
+      "type": "debugpy", "request": "launch", "module": "tac_ufld",
+      "args": ["run", "--config", "configs/elas_pilot_v2.yaml"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "6. Results pages (English and Portuguese)",
+      "type": "debugpy", "request": "launch", "module": "tac_ufld",
+      "args": ["site", "--runs", "results/elas_pilot_v2", "results/elas_lite_long", "--notes", "docs/PILOT_V2_FINDINGS.md",
+               "--authors", "Tiago Rodrigues", "Eva Laussac", "Everton Gomede",
+               "--affiliation", "UTFPR, Cornélio Procópio, Brazil", "--lang", "${input:lang}", "--out", "site/${input:lang}"],
+      "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "7. Metrics tables and charts",
+      "type": "debugpy", "request": "launch", "program": "${workspaceFolder}/scripts/build_metrics_folder.py",
+      "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "8. Interface (Streamlit)",
+      "type": "debugpy", "request": "launch", "module": "tac_ufld",
+      "args": ["ui"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    },
+    {
+      "name": "9. Tests of the open file",
+      "type": "debugpy", "request": "launch", "module": "pytest",
+      "args": ["-q", "${file}"], "cwd": "${workspaceFolder}", "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {"id": "dataset", "type": "pickString", "description": "Dataset", "options": ["culane", "tusimple", "openlane", "elas"]},
+    {"id": "datasetRoot", "type": "promptString", "description": "Folder where the dataset was extracted", "default": "D:\\datasets\\CULane"},
+    {"id": "lang", "type": "pickString", "description": "Page language", "options": ["en", "pt"]}
+  ]
+}

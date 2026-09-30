@@ -4,13 +4,18 @@ A reproducible research pipeline that compares the **Ultra-Fast Lane Detection (
 
 The package merges the supervisor's reference notebook (CULane, official UFLD, temporal variants v0.2–v0.4) and the ELAS development script, fixes the problems found in the first audit ([docs/AUDIT_REPORT.md](docs/AUDIT_REPORT.md)), and v0.3 adds the items audited in [docs/AUDIT_V03.md](docs/AUDIT_V03.md). **Supervisor hand-off: [docs/HANDOFF.md](docs/HANDOFF.md).**
 
-> **Status (v0.3.0).** 159 tests pass (1 skipped: ONNX Runtime CUDA provider) on Windows with an RTX 3050, and the suite also passes in the Linux CPU Docker image ([docs/TESTING.md](docs/TESTING.md)). A GPU **pilot** of the full protocol (6 models × 2 seeds, ≤ 4 epochs, no HPO) completed in 2 h 22 min on an RTX 3050: [docs/PILOT_FINDINGS.md](docs/PILOT_FINDINGS.md) and the results page. Pilot numbers are indicative; the full experiment (`configs/elas.yaml`, 6 seeds, HPO) has not been run yet. CULane / TuSimple / OpenLane are tested on synthetic copies of their layouts only; TensorRT ran on the development GPU, not on a Jetson.
+**Authors:** Tiago Rodrigues, Eva Laussac, Everton Gomede (UTFPR, Cornélio Procópio, Brazil).
+**Results page:** [English](https://tiagorodrigues-gith.github.io/tac-ufld-lane-detection/) · [Português](https://tiagorodrigues-gith.github.io/tac-ufld-lane-detection/pt/). **PDFs, charts and metrics tables:** [metrics_and_graphics/](metrics_and_graphics/).
+
+> **Status (v0.4.0, 30 Sep 2026).** 229 tests pass (1 skipped: ONNX Runtime CUDA provider) on Windows with an RTX 3050 ([docs/TESTING.md](docs/TESTING.md)). Pilots on ELAS: a second GPU pilot (11 models and controls × 2 seeds, ≤ 4 epochs, 4 h 47 min), a longer lite run, a robustness evaluation with a degraded current frame, and augmentation and history-length ablations ([docs/PILOT_V2_FINDINGS.md](docs/PILOT_V2_FINDINGS.md)). Pilot numbers are indicative; the full experiment (`configs/elas.yaml`, 6 seeds, HPO) has not been run yet. CULane, TuSimple and OpenLane are tested on synthetic copies of their layouts only; TensorRT ran on the development GPU, not on a Jetson.
 
 ---
 
 ## Contents
 
 - [Quick start](#quick-start)
+- [Opening the project in an IDE](#opening-the-project-in-an-ide)
+- [Datasets: download and how to run them](#datasets-download-and-how-to-run-them)
 - [Commands](#commands)
 - [What was fixed](#what-was-fixed)
 - [Models](#models)
@@ -44,6 +49,55 @@ python -m tac_ufld doctor                                             # environm
 
 ELAS: download from the [ELAS repository](https://github.com/rodrigoberriel/ego-lane-analysis-system); each scene needs `config.xml`, `groundtruth.xml` and `images/images/lane_<id>.png`. The default location is `../../datasets/dataset_elas_v1` relative to the project; otherwise set `ELAS_ROOT` (or edit `configs/datasets.yaml`). The ImageNet ResNet-18 weights (45 MB) are downloaded once to `~/.cache/torch/hub`. Optional desktop TensorRT: `pip install -e ".[tensorrt]"` (2.3 GB download).
 
+## Opening the project in an IDE
+
+The project is a plain Python package (`pyproject.toml`), so any IDE works. Create the virtual environment first (Quick start above), then:
+
+* **VS Code:** *File → Open Folder* on the project folder, install the recommended Python extension when asked, and pick `.venv` as the interpreter (*Python: Select Interpreter*). `.vscode/launch.json` has ready-made runs: environment check, ELAS smoke test, pilot, results pages, dataset check, UI, and the tests of the open file.
+* **PyCharm:** *File → Open* on the project folder, then *Settings → Project → Python Interpreter → Add → Existing* and select `.venv` (`.venv\Scripts\python.exe` on Windows, `.venv/bin/python` on Linux/macOS). Mark `src` as *Sources Root*. Run commands from the built-in terminal.
+* **Any other editor or plain terminal:** activate `.venv` and use the commands below.
+
+## Datasets: download and how to run them
+
+ELAS is the dataset used so far. The other three are prepared in the code and must be downloaded. Work through them in this order:
+
+| Order | Dataset | Why | Download | Size |
+|---|---|---|---|---|
+| 1 | **ELAS** | Current dataset; every pilot result comes from it | [ELAS repository](https://github.com/rodrigoberriel/ego-lane-analysis-system) | already on the development machine |
+| 2 | **CULane** | The standard lane-detection benchmark; UFLD and most papers report on it | [Google Drive](https://drive.google.com/drive/folders/1mSLgwVTiaUMAb4AVOWwlCD5JcWdrwpvu) | ≈ 41 GB |
+| 3 | **TuSimple** | Highway benchmark of 20-frame clips, so earlier frames are available for the temporal models | [Kaggle](https://www.kaggle.com/datasets/manideep1108/tusimple) (free account) | ≈ 24 GB |
+| 4 | **OpenLane** | **One of the most important datasets for this work:** long, continuous 10 Hz sequences with lanes annotated along every segment, the best match for temporal models. It comes after ELAS, CULane and TuSimple only because it is by far the largest download | [Google Drive](https://drive.google.com/drive/folders/18upnDfB-VVuQf3GPiv_JQn1-BUOcAotk) | ≈ 124 GB |
+
+The exact archives to download, where to extract them and the folder tree the code expects are in [docs/DATASET_DOWNLOAD_GUIDE.md](docs/DATASET_DOWNLOAD_GUIDE.md), which is written for whoever does the download. Then, for each dataset (CULane shown; use `tusimple` or `openlane` the same way):
+
+```powershell
+# 1. check the download (plain Python; it only reads files and prints READY / NOT READY)
+python scripts/check_dataset.py culane D:\datasets\CULane
+
+# 2. tell the code where the data is (Windows; use `export CULANE_ROOT=/data/CULane` on Linux/macOS)
+$env:CULANE_ROOT = "D:\datasets\CULane"          # this terminal only
+setx CULANE_ROOT "D:\datasets\CULane"            # permanently (open a new terminal afterwards)
+#    and set `enabled: true` for the dataset in configs/datasets.yaml
+
+# 3. check it with the project's own reader: counts, lane order, history frames, overlays in results/validate_culane/
+python -m tac_ufld validate-dataset --dataset culane
+
+# 4. a few batches through every stage (minutes)
+python scripts/smoke_datasets.py --datasets culane --device cuda
+
+# 5. the full run (days; --resume continues after an interruption)
+python -m tac_ufld run --dataset culane --confirm
+```
+
+| Dataset | Root variable | Config (image size, anchors, grid, temporal step, epochs, models) |
+|---|---|---|
+| ELAS | `ELAS_ROOT` (default `../../datasets/dataset_elas_v1`) | `configs/elas.yaml` |
+| CULane | `CULANE_ROOT` | `configs/culane.yaml` |
+| TuSimple | `TUSIMPLE_ROOT` | `configs/tusimple.yaml` |
+| OpenLane | `OPENLANE_ROOT` | `configs/openlane.yaml` |
+
+Nothing else in the code needs to change: the dataset is selected with `--dataset`, and everything specific to it lives in its adapter (`src/tac_ufld/data/<dataset>.py`) and its config. The "HOW TO SWITCH DATASETS" block at the top of `src/tac_ufld/cli.py` (also printed by `python -m tac_ufld --help`) explains each step. What each dataset allows for temporal models (stored frame rate, annotated frames, history) is compared in [docs/DATASETS.md](docs/DATASETS.md).
+
 ## Commands
 
 ```powershell
@@ -52,7 +106,7 @@ python -m tac_ufld check-data --config configs/elas.yaml          # splits, leak
 python -m tac_ufld sanity --config configs/elas.yaml --real      # model checks, no training
 python -m tac_ufld run --config configs/elas_smoke.yaml          # plumbing smoke run, ~9 min (numbers meaningless)
 python -m tac_ufld run --config configs/elas_pilot.yaml          # GPU pilot, ~2.5 h on an RTX 3050
-python -m tac_ufld run --config configs/elas.yaml --confirm      # full experiment, ~1.5-2 days on an RTX 3050
+python -m tac_ufld run --config configs/elas.yaml --confirm      # full experiment, ~4-5 days on an RTX 3050
 python -m tac_ufld run --config configs/elas.yaml --confirm --resume   # continue after an interruption
 python -m tac_ufld ablate --spec configs/ablations/augmentation.yaml    # plan; add --confirm to run
 python -m tac_ufld datasets | validate-dataset --dataset tusimple
@@ -60,8 +114,11 @@ python -m tac_ufld export --checkpoint <ckpt> --int8 --tensorrt fp16 --eval-fram
 python -m tac_ufld stream --checkpoint <ckpt> --video drive.mp4
 python -m tac_ufld benchmark --checkpoints <ckpt> ... --profile configs/deploy/jetson_orin_nano_assumed.yaml
 python -m tac_ufld ui                                            # Streamlit interface
-python -m tac_ufld site --runs results/elas_pilot                # static results page (GitHub Pages)
-python -m tac_ufld package --include-results results/elas_pilot  # hand-off ZIP
+python -m tac_ufld site --runs results/elas_pilot_v2 results/elas_lite_long --notes docs/PILOT_V2_FINDINGS.md   # results page
+python -m tac_ufld site --lang pt --out site/pt --runs ...        # the same page in Portuguese
+python scripts/build_metrics_folder.py                           # metrics tables + charts -> metrics_and_graphics/
+python -m tac_ufld robustness --runs results/elas_pilot_v2       # degraded current frame, history clean
+python -m tac_ufld package --include-results results/elas_pilot_v2  # hand-off ZIP
 ```
 
 Configs marked `requires_confirmation` (the full ELAS, CULane, TuSimple and OpenLane runs) refuse to start without `--confirm`, so a multi-day run is never started by accident. `--resume` continues an interrupted variant from its last epoch and reuses finished HPO studies and seeds.
