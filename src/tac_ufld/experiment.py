@@ -107,12 +107,12 @@ class ExperimentRunner:
         return splits
 
     def dataset(self, split: str, num_frames: int, augment: bool = False,
-                records: list[FrameRecord] | None = None) -> TemporalLaneDataset:
-        key = (split, num_frames, augment, None if records is None else len(records))
+                records: list[FrameRecord] | None = None, static_history: bool = False) -> TemporalLaneDataset:
+        key = (split, num_frames, augment, None if records is None else len(records), static_history)
         if key not in self._datasets:
             recs = records if records is not None else self.splits.as_dict()[split]
             self._datasets[key] = TemporalLaneDataset(recs, self.adapter, self.cfg.data, self.anchors,
-                                                      num_frames, augment=augment)
+                                                      num_frames, augment=augment, static_history=static_history)
         return self._datasets[key]
 
     def loader(self, dataset: TemporalLaneDataset, shuffle: bool, seed: int = 0) -> DataLoader:
@@ -191,6 +191,9 @@ class ExperimentRunner:
     def _frames(self, variant: str) -> int:
         return self.cfg.data.num_frames if resolve_spec(variant, self.cfg).temporal else 1
 
+    def _static(self, variant: str) -> bool:
+        return resolve_spec(variant, self.cfg).history == "current"
+
     def train_variant(self, variant: str, seed: int, hp: Hyperparams, epochs: int, patience: int,
                       warm_from: Path | None, checkpoint: Path | None, train_records=None,
                       trial=None, writer=None, tag: str = "", resume: bool = False
@@ -199,8 +202,9 @@ class ExperimentRunner:
         spec = resolve_spec(variant, self.cfg)
         frames = self._frames(variant)
         model = self._build(variant, warm_from)
-        train_ds = self.dataset("train", frames, augment=True, records=train_records)
-        val_ds = self.dataset("val", frames)
+        static = self._static(variant)
+        train_ds = self.dataset("train", frames, augment=True, records=train_records, static_history=static)
+        val_ds = self.dataset("val", frames, static_history=static)
         trainer = Trainer(
             model, spec, self.cfg, hp, self.device,
             train_loader=self.loader(train_ds, shuffle=True, seed=seed),
@@ -322,7 +326,8 @@ class ExperimentRunner:
             frames = self._frames(variant)
             model = build_model(variant, cfg, pretrained=False).to(self.device)
             load_checkpoint(checkpoints[variant], model, self.device)
-            val_ds = self.dataset("val", frames)
+            static = self._static(variant)
+            val_ds = self.dataset("val", frames, static_history=static)
             val_preds = predict(model, self.loader(val_ds, False), self.device, cfg.data.img_w, cfg.train.amp)
             tuned, sweep = self.evaluator.sweep(val_preds, val_ds.records, cfg.evaluation.postprocess_grid, common)
             sweep.to_csv(seed_dir / "postprocess" / f"{variant}_val_sweep.csv", index=False)
@@ -338,10 +343,10 @@ class ExperimentRunner:
             for split in EVAL_SPLITS:
                 if not self.splits.as_dict()[split]:
                     continue
-                ds = self.dataset(split, frames)
+                ds = self.dataset(split, frames, static_history=static)
                 preds = predict(model, self.loader(ds, False), self.device, cfg.data.img_w, cfg.train.amp)
                 variants_of_input = [("full", preds)]
-                if spec.temporal:
+                if spec.temporal and not static:
                     variants_of_input.append(("static_history", predict(
                         model, self.loader(ds, False), self.device, cfg.data.img_w, cfg.train.amp,
                         static_history=True)))
@@ -409,6 +414,9 @@ class ExperimentRunner:
                   if resolve_spec(v, cfg).budget_reference in self.variants]
         pairs += [(v, resolve_spec(v, cfg).warm_start) for v in self.variants
                   if not resolve_spec(v, cfg).temporal and resolve_spec(v, cfg).warm_start in self.variants]
+        # capacity control: the same temporal model fed the current frame only
+        pairs += [(v, resolve_spec(v, cfg).static_reference) for v in self.variants
+                  if resolve_spec(v, cfg).static_reference in self.variants]
         sheets, md = {}, [f"# Experiment report: {cfg.name}\n",
                           f"Config hash `{cfg.config_hash()}`, package {__version__}, seeds {self.seeds}, "
                           f"device {self.device}.\n",

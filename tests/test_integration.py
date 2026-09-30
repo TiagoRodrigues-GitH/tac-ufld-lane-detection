@@ -50,7 +50,8 @@ def test_v04_pipeline_with_new_models_controls_and_temporal_references(tiny_conf
     cfg.data.augmentation.current_frame_prob = 0.5
     cfg.evaluation.postprocess_grid = {"threshold": [0.5], "min_points": [2], "poly_degree": [0]}
     cfg.evaluation.kalman_grid = {"q": [1.0], "alpha": [0.0, 0.5]}
-    variants = ["ufld_baseline", "ufld_baseline_ct", "ufld_v06", "ufld_v07", "lite_baseline", "lite_v06"]
+    variants = ["ufld_baseline", "ufld_baseline_ct", "ufld_v06", "ufld_v07", "lite_baseline", "lite_v05",
+                "lite_v05_static", "lite_v06"]
     runner = ExperimentRunner(cfg, variants=variants)
     report = runner.run()
     results = pd.read_csv(runner.out / "all_results.csv")
@@ -62,7 +63,9 @@ def test_v04_pipeline_with_new_models_controls_and_temporal_references(tiny_conf
     paired = pd.read_csv(runner.out / "report" / "paired_tests_test_tuned.csv")
     pairs = set(zip(paired["variant"], paired["reference"]))
     assert {("ufld_v06", "ufld_baseline"), ("ufld_v06", "ufld_baseline_ct"),
-            ("ufld_baseline_ct", "ufld_baseline")} <= pairs
+            ("ufld_baseline_ct", "ufld_baseline"), ("lite_v05", "lite_v05_static")} <= pairs
+    static = results[(results["variant"] == "lite_v05_static") & (results["input"] == "static_history")]
+    assert static.empty  # the capacity control has no separate static-history ablation
     text = report.read_text(encoding="utf-8")
     for section in ("Output-level Kalman tracker", "carried state", "Where temporal information should help"):
         assert section in text

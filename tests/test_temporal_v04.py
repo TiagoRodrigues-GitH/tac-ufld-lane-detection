@@ -293,3 +293,29 @@ def test_each_run_log_only_receives_its_own_run(tmp_path):
     assert "second run" not in first.read_text(encoding="utf-8")
     assert "second run" in second.read_text(encoding="utf-8")
     setup_logging(tmp_path / "c" / "run.log")  # release the file handle of the test's last log
+
+
+def test_static_history_control_sees_only_the_current_frame(tiny_config):
+    """lite_v05_static: every position of the clip is the current frame, AFTER
+    augmentation (so a degraded current frame is never paired with a clean copy)."""
+    from tac_ufld.data import build_adapter
+    from tac_ufld.data.dataset import TemporalLaneDataset
+    from tac_ufld.data.splits import build_splits
+    from tac_ufld.data.targets import make_row_anchors
+    from tac_ufld.inference.card import model_card
+
+    cfg = tiny_config
+    cfg.data.augmentation.current_frame_prob = 1.0
+    d = cfg.data
+    adapter = build_adapter(cfg)
+    splits, _ = build_splits(cfg, adapter)
+    anchors = make_row_anchors(d.img_h, d.num_row_anchors, d.row_anchor_range)
+    ds = TemporalLaneDataset(splits.train[:4], adapter, d, anchors, d.num_frames, augment=True, static_history=True)
+    for i in range(4):
+        clip = ds[i]["images"]
+        assert clip.shape[0] == d.num_frames
+        assert all(torch.equal(clip[0], clip[k]) for k in range(1, d.num_frames))
+    real = TemporalLaneDataset(splits.train[:4], adapter, d, anchors, d.num_frames)
+    assert not all(torch.equal(real[i]["images"][0], real[i]["images"][-1]) for i in range(4))
+    assert model_card(cfg, "lite_v05_static")["static_history"] and not model_card(cfg, "lite_v05")["static_history"]
+    assert VARIANTS["lite_v05"].static_reference == "lite_v05_static"

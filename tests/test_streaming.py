@@ -74,7 +74,8 @@ def test_streaming_equals_clip_forward(tmp_path, variant, mode):
     frames = _frames()
     for t in range(len(frames)):
         res = det.infer_frame(frames[t], frame_index=t)
-        ctx = _dataset_context(t, set(range(t)), cfg.data.temporal_step, cfg.data.num_frames)
+        ctx = ([t] * cfg.data.num_frames if loaded.card.get("static_history")   # capacity control
+               else _dataset_context(t, set(range(t)), cfg.data.temporal_step, cfg.data.num_frames))
         np.testing.assert_allclose(res.exist, _reference(loaded, frames, ctx), atol=1e-5)
         assert res.history_indices == ctx[:-1]
         assert det.cache_size() <= (cfg.data.num_frames - 1) * cfg.data.temporal_step + 1

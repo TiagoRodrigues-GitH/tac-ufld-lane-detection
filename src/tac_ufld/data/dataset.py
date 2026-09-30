@@ -47,10 +47,15 @@ class TemporalLaneDataset(Dataset):
         row_anchors: np.ndarray,
         num_frames: int,
         augment: bool = False,
+        static_history: bool = False,
     ) -> None:
         self.records = records
         self.cfg = cfg
         self.num_frames = num_frames
+        # Capacity control (``*_static`` variants): the clip is the CURRENT frame
+        # repeated num_frames times, built after augmentation so every position
+        # carries the same (possibly degraded) image and no temporal information.
+        self.static_history = static_history
         self.row_anchors = row_anchors
         self.augmenter = PhotometricAugmenter(cfg.augmentation) if augment else None
         geo = cfg.augmentation.geometric
@@ -90,7 +95,8 @@ class TemporalLaneDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         cfg = self.cfg
-        frames = torch.stack([load_frame(p, cfg.img_w, cfg.img_h) for p in self.context_paths[idx]])
+        paths = self.context_paths[idx][-1:] if self.static_history else self.context_paths[idx]
+        frames = torch.stack([load_frame(p, cfg.img_w, cfg.img_h) for p in paths])
         t = self.targets[idx]
         if self.geometric is not None:
             sampled = self.geometric.sample(cfg.img_w, cfg.img_h)
@@ -103,8 +109,11 @@ class TemporalLaneDataset(Dataset):
         if self.augmenter is not None:
             frames = self.augmenter(frames)
         frames = self.preprocessor(frames)
+        images = normalize_channels(frames, self.mean, self.std)
+        if self.static_history and self.num_frames > 1:
+            images = images.expand(self.num_frames, *images.shape[1:]).contiguous()
         return {
-            "images": normalize_channels(frames, self.mean, self.std),
+            "images": images,
             "cls": torch.from_numpy(t.cls),
             "exist": torch.from_numpy(t.exist),
             "x": torch.from_numpy(t.x),

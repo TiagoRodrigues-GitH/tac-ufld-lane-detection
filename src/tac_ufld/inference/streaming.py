@@ -109,6 +109,8 @@ class StreamingLaneDetector:
         self.step = int(loaded.card["temporal_step"])
         max_history = self.num_frames - 1
         self.history_length = max_history if history_length is None else int(history_length)
+        if loaded.card.get("static_history"):  # capacity control: trained on the current frame repeated
+            self.history_length = 0
         if not 0 <= self.history_length <= max_history:
             raise ValueError(f"history_length must be in [0, {max_history}] for this model")
         self.nominal_fps = nominal_fps

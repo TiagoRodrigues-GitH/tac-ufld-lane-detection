@@ -104,7 +104,8 @@ def deploy_eval(loaded: LoadedModel, backend, records: list, adapter) -> dict:
     from tac_ufld.evaluation.predictor import Predictions
 
     cfg = loaded.cfg
-    ds = TemporalLaneDataset(records, adapter, cfg.data, loaded.row_anchors, loaded.num_frames, augment=False)
+    ds = TemporalLaneDataset(records, adapter, cfg.data, loaded.row_anchors, loaded.num_frames, augment=False,
+                             static_history=bool(loaded.card.get("static_history")))
     pre = FramePreprocessor(cfg)
     cache: OrderedDict = OrderedDict()
     exist_all, x_all = [], []

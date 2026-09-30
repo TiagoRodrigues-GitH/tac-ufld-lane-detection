@@ -90,6 +90,14 @@ MODEL_NOTES: dict[str, dict[str, str]] = {
                 "closed mixes the aligned history in.",
         "differs": "Same fusion idea as UFLD v0.6 on a network that is 8 times smaller.",
     },
+    "lite_v05_static": {
+        "role": "control", "origin": "v0.4 control",
+        "frames": "t, t, t", "history": "warp + gate on copies of t", "aligns": "n/a", "memory": "none",
+        "what": "Lite v0.5 exactly (same layers, warm start, loss and budget), but every history frame is replaced "
+                "by the current frame, in training and at test time.",
+        "differs": "A capacity control. Lite v0.5 has extra fusion layers; if it beats this model, the gain comes "
+                   "from the earlier frames and not from the extra layers.",
+    },
     "lite_v06": {
         "role": "temporal", "origin": "New in v0.4",
         "frames": "t-4, t-2, t", "history": "ConvGRU", "aligns": "no", "memory": "recurrent state",

@@ -8,8 +8,9 @@
 # 4 epochs the lite baseline is far from converged. This run gives the lite
 # family up to 16 epochs (patience 4) so that "can a lightweight temporal model
 # match UFLD?" is not answered by an under-trained model. Same split, recipe,
-# seeds and evaluation as the second pilot; the equal-training control
-# lite_baseline_ct gets the same extra budget as lite v0.5 / v0.6.
+# seeds and evaluation as the second pilot. Two controls: lite_baseline_ct
+# gets the same extra training as lite v0.5 / v0.6, and lite_v05_static is
+# lite v0.5 fed the current frame in every position (same layers, no time).
 
 name: elas_lite_long
 output_dir: results
@@ -61,7 +62,7 @@ data:
     seen_test_fraction: 0.15
 
 model:
-  variants: [lite_baseline, lite_baseline_ct, lite_v05, lite_v06]
+  variants: [lite_baseline, lite_baseline_ct, lite_v05, lite_v05_static, lite_v06]
   pretrained: true
 
 train:

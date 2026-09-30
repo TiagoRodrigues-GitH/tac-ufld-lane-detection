@@ -24,6 +24,7 @@ def model_card(cfg: ExperimentConfig, variant: str) -> dict:
         "temporal": spec.temporal,
         "num_frames": d.num_frames if spec.temporal else 1,
         "temporal_step": d.temporal_step,
+        "static_history": spec.history == "current",   # capacity control: history = the current frame
         "dataset": d.dataset,
         "input": {
             "height": d.img_h, "width": d.img_w,

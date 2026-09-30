@@ -43,6 +43,12 @@ class VariantSpec:
     # extra training from the same starting checkpoint (``*_baseline_ct``).
     # A temporal gain over it cannot come from more epochs.
     budget_reference: str | None = None
+    # "real" history, or "current": the clip is the current frame repeated
+    # (capacity control: same layers and training, no temporal information).
+    history: str = "real"
+    # The capacity-control twin of a temporal model (``*_static``): a gain
+    # over it cannot come from the extra fusion layers.
+    static_reference: str | None = None
 
 
 VARIANTS: dict[str, VariantSpec] = {
@@ -100,7 +106,13 @@ VARIANTS: dict[str, VariantSpec] = {
         "lite_v05", "Lite v0.5 warped fusion", "lite", True, "lite_baseline", "lite_baseline",
         temporal_consistency=True, flow_smoothness_weight=0.01,
         origin="ELAS script: TACUFLDTemporalModel (LearnableFlowWarp + ResidualTemporalFusion)",
-        fusion="warp", budget_reference="lite_baseline_ct",
+        fusion="warp", budget_reference="lite_baseline_ct", static_reference="lite_v05_static",
+    ),
+    "lite_v05_static": VariantSpec(
+        "lite_v05_static", "Lite v0.5 static history (capacity control)", "lite", True, "lite_baseline",
+        "lite_baseline", temporal_consistency=True, flow_smoothness_weight=0.01,
+        origin="v0.4 control: lite v0.5 with every history frame replaced by the current frame",
+        fusion="warp", budget_reference="lite_baseline_ct", history="current",
     ),
     "lite_v06": VariantSpec(
         "lite_v06", "Lite v0.6 recurrent (ConvGRU)", "lite", True, "lite_baseline", "lite_baseline",
@@ -115,7 +127,7 @@ SHORT_LABELS = {
     "ufld_baseline": "UFLD baseline", "ufld_baseline_ct": "UFLD baseline +CT", "ufld_v02": "UFLD v0.2 weighted",
     "ufld_v03": "UFLD v0.3 gated", "ufld_v04": "UFLD v0.4 coord", "ufld_v06": "UFLD v0.6 aligned",
     "ufld_v07": "UFLD v0.7 ConvGRU", "lite_baseline": "Lite baseline", "lite_baseline_ct": "Lite baseline +CT",
-    "lite_v05": "Lite v0.5 warped", "lite_v06": "Lite v0.6 ConvGRU",
+    "lite_v05": "Lite v0.5 warped", "lite_v05_static": "Lite v0.5 static", "lite_v06": "Lite v0.6 ConvGRU",
 }
 
 
