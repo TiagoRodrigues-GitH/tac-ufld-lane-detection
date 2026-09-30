@@ -257,10 +257,10 @@ def test_history_ablation_grid_shares_split_and_reuses_the_baseline(tmp_path):
     ref = configs[spec.reference_arm]
     ck = ref.output_root() / "seed_1" / "checkpoints"
     ck.mkdir(parents=True)
-    (ck / "lite_baseline.pt").write_bytes(b"x")
-    (ref.output_root() / "seed_1" / "history_lite_baseline.csv").write_text("epoch\n1\n", encoding="utf-8")
-    assert reuse_single_frame(configs, spec.reference_arm, "s10_t5") == ["lite_baseline seed 1"]
-    assert (configs["s10_t5"].output_root() / "seed_1" / "checkpoints" / "lite_baseline.pt").exists()
+    (ck / "ufld_baseline.pt").write_bytes(b"x")
+    (ref.output_root() / "seed_1" / "history_ufld_baseline.csv").write_text("epoch\n1\n", encoding="utf-8")
+    assert reuse_single_frame(configs, spec.reference_arm, "s10_t5") == ["ufld_baseline seed 1"]
+    assert (configs["s10_t5"].output_root() / "seed_1" / "checkpoints" / "ufld_baseline.pt").exists()
 
 
 def test_ablation_allow_list_is_explicit(tmp_path):

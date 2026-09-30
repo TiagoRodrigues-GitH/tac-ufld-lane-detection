@@ -1,0 +1,83 @@
+# Lite family with a longer budget under the v0.4 recipe.
+#
+#   python -m tac_ufld run --config configs/elas_lite_long.yaml
+#
+# Why: with geometric augmentation + current-frame degradation (the recipe
+# of configs/elas_pilot_v2.yaml) the lite models, which train from scratch,
+# learn much more slowly than the ImageNet-pretrained UFLD: after the pilot's
+# 4 epochs the lite baseline is far from converged. This run gives the lite
+# family up to 16 epochs (patience 4) so that "can a lightweight temporal model
+# match UFLD?" is not answered by an under-trained model. Same split, recipe,
+# seeds and evaluation as the second pilot; the equal-training control
+# lite_baseline_ct gets the same extra budget as lite v0.5 / v0.6.
+
+name: elas_lite_long
+output_dir: results
+device: auto
+description: "Lite family, v0.4 recipe, up to 16 epochs (patience 4), 2 seeds, no HPO. Indicative only."
+
+data:
+  dataset: elas
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
+  scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
+  scene_tags:
+    BR_S01: {transition: true}
+    BR_S02: {transition: true}
+    ROD_S03: {rainy: true}
+    VIX_S03: {occlusion: true, transition: true}
+    VIX_S04: {transition: true}
+    VIX_S05: {occlusion: true}
+    VIX_S07: {shaky: true, transition: true}
+    VIX_S11: {}
+    VV_S03: {transition: true}
+    GRI_S01: {transition: true}
+  img_h: 384
+  img_w: 512
+  num_lanes: 2
+  num_row_anchors: 18
+  row_anchor_range: [0.59, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 2
+  normalize: imagenet
+  num_workers: 4
+  augmentation:
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale: [0.9, 1.1]
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale: [0.85, 1.0]
+    current_frame_prob: 0.3
+  split:
+    split_seed: 2026
+    test_scenes: [BR_S02, VIX_S05, VV_S03]
+    block_size: 60
+    purge_frames: 10
+    val_fraction: 0.2
+    seen_test_fraction: 0.15
+
+model:
+  variants: [lite_baseline, lite_baseline_ct, lite_v05, lite_v06]
+  pretrained: true
+
+train:
+  seeds: [1, 2]
+  epochs: 16
+  early_stopping_patience: 4
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid:
+    threshold: [0.4, 0.5, 0.6]
+    min_points: [2, 3]
+    poly_degree: [0, 1]
+  latency_runs: 30
+  n_visual_examples: 8
+  visualize_seeds: 1
+  tensorboard: true
