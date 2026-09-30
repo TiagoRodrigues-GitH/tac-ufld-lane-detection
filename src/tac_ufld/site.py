@@ -135,6 +135,18 @@ code { font-family: var(--mono); font-size: .92em; }
 a { color: var(--accent-ink); text-underline-offset: 3px; }
 a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--rule); padding-top: 16px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 185px), 1fr)); gap: 12px; }
+.kpi { border: 1px solid var(--rule); border-top: 3px solid var(--accent); border-radius: 6px; padding: 12px 14px;
+  display: grid; gap: 4px; align-content: start; min-width: 0; }
+.kpi .v { font: 600 25px/1.15 var(--display); font-variant-numeric: tabular-nums; color: var(--ink); }
+.kpi .k { font: 600 11px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent-ink); }
+.kpi .l { font-size: 13px; line-height: 1.45; color: var(--muted); }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; }
+.charts > .panel, .plan > .panel { align-content: start; }
+.plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
+.plan ul, .plan ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.plan li { font-size: 14.5px; }
+svg .clean { fill: var(--bg); stroke: var(--ink); stroke-width: 1.6; } svg .hit { stroke: var(--bad); stroke-width: 2; opacity: .55; }
 @media (max-width: 720px) { .card .body { grid-template-columns: 1fr; gap: 8px; } .card .cost { margin-left: 0; } }
 @media (max-width: 560px) { .wrap { padding-inline: 16px; } h2 { font-size: 23px; }
   .phase li { grid-template-columns: 1fr; gap: 4px; } }
@@ -230,6 +242,34 @@ def delta_chart(rows: list[dict], width: int = 760, label_w: int = 190) -> str:
             parts.append(f'<circle class="dot" cx="{x(s):.1f}" cy="{y + 11.5}" r="3.5"/>')
         tx = max([x(m), *[x(s) for s in r["seeds"]]]) + 8
         parts.append(f'<text x="{tx:.1f}" y="{y + 16}">{m:+.3f}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def dumbbell_chart(rows: list[dict], a_label: str, b_label: str, width: int = 760, left: int = 190) -> str:
+    """Two values per row on one scale: ``a`` (hollow dot) and ``b`` (filled,
+    family colour), joined by a line. Used for clean vs degraded lane F1."""
+    right, row_h, top = 70, 30, 34
+    vals = [v for r in rows for v in (r["a"], r["b"]) if np.isfinite(v)] or [0.0, 1.0]
+    lo = max(0.0, np.floor(min(vals) * 10) / 10 - 0.1)
+    height = top + row_h * len(rows) + 30
+    plot_w = width - left - right
+    x = lambda v: left + plot_w * (v - lo) / (1.0 - lo)
+    parts = [f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{esc(a_label)} and {esc(b_label)} per model">',
+             f'<circle class="clean" cx="{left + 6}" cy="12" r="5"/><text x="{left + 16}" y="16">{esc(a_label)}</text>',
+             f'<circle class="ufld" cx="{left + 200}" cy="12" r="5"/><text x="{left + 210}" y="16">{esc(b_label)}</text>']
+    for t in np.arange(np.ceil(lo * 10) / 10, 1.0001, 0.1):
+        parts.append(f'<line class="grid" x1="{x(t):.1f}" y1="{top - 8}" x2="{x(t):.1f}" y2="{height - 26}"/>'
+                     f'<text x="{x(t):.1f}" y="{height - 10}" text-anchor="middle">{t:.1f}</text>')
+    for i, r in enumerate(rows):
+        y = top + i * row_h + 12
+        fam = FAMILY.get(r["variant"], "ufld")
+        parts.append(f'<text class="label" x="{left - 10}" y="{y + 4}" text-anchor="end">{esc(r["label"])}</text>')
+        parts.append(f'<line class="hit" x1="{x(r["a"]):.1f}" y1="{y}" x2="{x(r["b"]):.1f}" y2="{y}"/>')
+        parts.append(f'<circle class="clean" cx="{x(r["a"]):.1f}" cy="{y}" r="5"/>'
+                     f'<circle class="{fam}" cx="{x(r["b"]):.1f}" cy="{y}" r="5.5"/>')
+        parts.append(f'<text x="{max(x(r["a"]), x(r["b"])) + 10:.1f}" y="{y + 4}">{r["b"]:.3f} '
+                     f'({r["b"] - r["a"]:+.3f})</text>')
     parts.append("</svg>")
     return "".join(parts)
 
@@ -761,8 +801,172 @@ def _extra_run_section(run: Path, main_run: Path, main_df: pd.DataFrame) -> str:
             f'{_temporal_block(run, df)}</section>')
 
 
+def _md_lists(path: Path) -> dict[str, list[str]]:
+    """``## Heading`` -> its ``- item`` / ``1. item`` lines, in order."""
+    out, current = {}, None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            current = out.setdefault(line[3:].strip(), [])
+        elif current is not None and re.match(r"(- |\d+\. )", line):
+            current.append(re.sub(r"^(- |\d+\. )", "", line).strip())
+    return out
+
+
+def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summary: Path | None) -> str:
+    """One-screen overview for a short presentation: key figures and the four
+    most telling charts, all computed from the run folders, plus the
+    hand-written challenges and next steps (``docs/RESEARCH_SUMMARY.md``)."""
+    metric = "lane_f1_iou50"
+    root = run.parent
+    report = run / "report"
+
+    def test_rows(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[(frame["split"] == "test") & (frame["protocol"] == "tuned") & (frame["input"] == "full")]
+
+    main = test_rows(df)
+    lite_run, lite = None, None  # the lite family from a longer run, when one is given
+    for r in extra_runs:
+        r = r if r.is_absolute() else PROJECT_ROOT / r
+        if (r / "all_results.csv").exists():
+            d = test_rows(pd.read_csv(r / "all_results.csv"))
+            if not d.empty and all(FAMILY.get(v) == "lite" for v in d["variant"].unique()):
+                lite_run, lite = r, d
+    both = pd.concat([main[main["variant"].map(FAMILY) != ("lite" if lite is not None else "none")],
+                      lite if lite is not None else main.iloc[0:0]], ignore_index=True)
+    f1 = both.groupby("variant")[metric].mean()
+    seeds = lambda frame, v: frame[frame["variant"] == v].sort_values("seed")[metric].astype(float).tolist()
+    effs = [e for e in (_read(report / "efficiency.csv"),
+                        _read(lite_run / "report" / "efficiency.csv") if lite_run else None) if e is not None]
+    eff = pd.concat(effs).drop_duplicates("variant", keep="last").set_index("variant") if effs else None
+    temporal_ufld = [v for v in f1.index if FAMILY.get(v) == "ufld" and VARIANTS[v].temporal]
+    kpis, panels = [], []
+
+    aug = _read(root / "ablation_augmentation" / "ablation_results.csv")
+    if aug is not None and {"photometric", "geometric"} <= set(aug["arm"]):
+        a = aug[aug["split"] == "test"] if "split" in aug else aug
+        before, after = a[a["arm"] == "photometric"][metric].mean(), a[a["arm"] == "geometric"][metric].mean()
+        kpis.append(("Overfitting fixed", f"{before:.2f} → {after:.2f}",
+                     "UFLD baseline, held-out lane F1: original augmentation vs + geometric augmentation (3 seeds)"))
+        arm_rows = []
+        for arm in dict.fromkeys(a["arm"]):
+            v = a[a["arm"] == arm][metric].astype(float)
+            arm_rows.append({"variant": "ufld_baseline", "label": arm.replace("_", " "), "mean": float(v.mean()),
+                             "seeds": v.tolist()})
+        arm_rows.sort(key=lambda r: -r["mean"])
+        panels.append(("1 · Overfitting: what fixed it", bar_chart(arm_rows, "held-out lane F1 per training recipe",
+                                                                    width=540, left=150),
+                       "UFLD baseline trained with each recipe (same split, seeds and epochs); held-out lane F1. "
+                       "Geometric augmentation (shift, zoom, rotation, perspective) is the fix; flips and heavy "
+                       "regularisation are not."))
+
+    if "ufld_baseline" in f1 and temporal_ufld:
+        best = max(temporal_ufld, key=lambda v: f1[v])
+        kpis.append(("Clean frames", f"{f1['ufld_baseline']:.3f} vs {f1[best]:.3f}",
+                     f"UFLD baseline vs the best temporal model ({LABELS[best]}): within seed noise "
+                     f"({len(seeds(both, best))} seeds)"))
+
+    rob_rows, occ_kpi = [], None
+    for source, frame in ((run, main), (lite_run, lite)):
+        rob = _read(source / "report" / "robustness_summary.csv") if source is not None else None
+        per_seed = _read(source / "report" / "robustness.csv") if source is not None else None
+        if rob is None:
+            continue
+        occ = rob[(rob["input"] == "degraded") & (rob["op"] == "occlude")].set_index("variant")
+        for v in [v for v in ORDER if v in occ.index]:
+            if source == run and lite is not None and FAMILY[v] == "lite":
+                continue
+            if v.endswith("_ct") and FAMILY[v] == "lite":
+                continue
+            rob_rows.append({"variant": v, "label": LABELS[v], "a": float(occ.loc[v, "clean_lane_f1"]),
+                             "b": float(occ.loc[v, "lane_f1"])})
+        cands = [v for v in occ.index if FAMILY.get(v) == "ufld" and VARIANTS[v].temporal]
+        if source == run and cands and "ufld_baseline" in occ.index and per_seed is not None:
+            best = max(cands, key=lambda v: occ.loc[v, "lane_f1"])
+            ps = per_seed[(per_seed["input"] == "degraded") & (per_seed["op"] == "occlude")]
+            gain = (ps[ps["variant"] == best].set_index("seed")["lane_f1"]
+                    - ps[ps["variant"] == "ufld_baseline"].set_index("seed")["lane_f1"]).dropna()
+            every = "in every seed" if len(gain) and (gain > 0).all() else "not in every seed"
+            occ_kpi = ("Occluded current frame", f"{occ.loc['ufld_baseline', 'lane_f1']:.3f} → "
+                       f"{occ.loc[best, 'lane_f1']:.3f}",
+                       f"UFLD baseline vs {LABELS[best]} when the current frame is occluded and the earlier frames "
+                       f"are clean: {gain.mean():+.3f}, {every}")
+    if occ_kpi:
+        kpis.append(occ_kpi)
+    if rob_rows:
+        panels.append(("2 · Where time helps: an occluded current frame",
+                       dumbbell_chart(rob_rows, "clean current frame", "occluded current frame", width=540, left=150),
+                       "Held-out lane F1 with clean frames (hollow) and with the current frame occluded by boxes "
+                       "while the earlier frames stay clean (filled); the number is the occluded F1 and its change. "
+                       "Single-frame models only see the damaged image."))
+
+    kal = _read(report / "kalman_reference.csv")
+    if kal is not None and not kal.empty:
+        k = kal[kal["metric"] == "jitter_px"].set_index("variant")["mean"]
+        red = [1 - k[v + "+kf"] / k[v] for v in k.index if not v.endswith("+kf") and v + "+kf" in k.index]
+        if red:
+            kpis.append(("Kalman tracker on the output", f"−{100 * float(np.mean(red)):.0f} % jitter",
+                         "for every model, with unchanged lane F1: the cheap temporal reference a learned model "
+                         "has to beat"))
+
+    if eff is not None and "ufld_baseline" in f1 and "lite_v05" in f1 and "lite_v05" in eff.index:
+        pb, pl = eff.loc["ufld_baseline", "params_millions"], eff.loc["lite_v05", "params_millions"]
+        kpis.append(("Lightweight model", f"{f1['lite_v05']:.3f} · {pl:.1f} M",
+                     f"Lite v0.5 lane F1 and parameters, against {f1['ufld_baseline']:.3f} with {pb:.1f} M for the "
+                     f"UFLD baseline ({pb / pl:.0f}× fewer parameters)"))
+    if eff is not None:
+        size_rows = []
+        for v in [v for v in ORDER if v in f1.index and v in eff.index and not v.endswith("_ct")]:
+            e = eff.loc[v]
+            size_rows.append({"variant": v, "mean": float(f1[v]), "seeds": seeds(both, v),
+                              "label": f"{LABELS[v]} · {e['params_millions']:.1f} M"})
+        src = f" Lite models from <code>{esc(lite_run.name)}</code> (longer training)." if lite_run else ""
+        panels.append(("3 · Accuracy against size", bar_chart(size_rows, "held-out lane F1 with model size",
+                                                              width=540, left=190),
+                       f"Held-out lane F1 (clean frames) and parameters. Compute per frame: UFLD {eff.loc['ufld_baseline', 'gmacs']:.1f} GMAC, "
+                       f"lite {eff.loc['lite_baseline', 'gmacs']:.1f} GMAC; a temporal model streaming with cached features "
+                       "adds only its fusion (it recomputes 3 frames otherwise)."
+                       + src))
+
+    hist = _read(root / "ablation_history" / "ablation_results.csv")
+    if hist is not None and not hist.empty:
+        h = hist[hist["split"] == "test"] if "split" in hist else hist
+        tv = [v for v in h["variant"].unique() if VARIANTS.get(v) and VARIANTS[v].temporal]
+        rows = []
+        for arm in sorted(h["arm"].unique(), key=lambda a: tuple(int(n) for n in re.findall(r"\d+", a))):
+            m = re.match(r"s(\d+)_t(\d+)", arm)
+            if not m or not tv:
+                continue
+            sub = h[h["arm"] == arm]
+            a_ = sub[sub["variant"] == tv[0]].set_index("seed")[metric]
+            b_ = sub[sub["variant"] == VARIANTS[tv[0]].reference].set_index("seed")[metric]
+            d = (a_ - b_).dropna()
+            if len(d):
+                rows.append({"label": f"{m.group(2)} frames, step {m.group(1)}", "mean": float(d.mean()),
+                             "seeds": d.tolist()})
+        if rows:
+            panels.append((f"4 · How far back to look ({LABELS[tv[0]]})", delta_chart(rows, width=540, label_w=150),
+                           f"Held-out lane F1 of {LABELS[tv[0]]} minus the UFLD baseline for each history length and "
+                           "spacing (history frame k = t − k·step; same split and baseline for every arm). "
+                           "Spacing changes little; five frames are worse than three."))
+
+    plan = _md_lists(summary) if summary is not None and summary.exists() else {}
+    tiles = "".join(f'<div class="kpi"><span class="k">{esc(k)}</span><span class="v">{esc(v)}</span>'
+                    f'<span class="l">{esc(l)}</span></div>' for k, v, l in kpis)
+    charts = "".join(f'<figure class="panel"><h3>{esc(t)}</h3>{svg}<figcaption>{cap}</figcaption></figure>'
+                     for t, svg, cap in panels)
+    lists = "".join(f'<div class="panel"><h3>{esc(title)}</h3><{"ol" if title.lower().startswith("next") else "ul"}>'
+                    + "".join(f"<li>{_md(i)}</li>" for i in items)
+                    + f'</{"ol" if title.lower().startswith("next") else "ul"}></div>' for title, items in plan.items())
+    return ('<section id="summary"><h2>Where the research stands</h2><p class="lede">Question: can a lightweight '
+            'lane detector that also looks at the previous frames beat the single-frame UFLD baseline, and run on '
+            'an in-car embedded system? Everything below comes from pilot runs on ELAS (2–3 seeds, short training, '
+            'no hyper-parameter search), so it shows directions, not final claims.</p>'
+            f'<div class="kpis">{tiles}</div><div class="charts">{charts}</div>'
+            + (f'<div class="plan">{lists}</div>' if lists else "") + "</section>")
+
+
 def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None = None,
-               notes: Path | None = None, roadmap: Path | None = None) -> Path:
+               notes: Path | None = None, roadmap: Path | None = None, summary: Path | None = None) -> Path:
     """``runs[0]`` is the run shown; ablation summaries, benchmarks and the demo
     video are read from ``<results>/ablation_*``, ``<results>/benchmarks`` and
     ``<results>/demo`` next to it (``extra`` is reserved for further report files)."""
@@ -800,6 +1004,9 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
              'or model selection.</p><div class="meta">'
              + "".join(f'<span class="chip">{esc(c)}</span>' for c in chips)
              + '<span class="chip warn">indicative pilot, not the full protocol</span></div></header>')
+
+    # one-screen overview (key figures, four charts, challenges, next steps)
+    s.append(_summary_section(run, df, runs[1:], summary or PROJECT_ROOT / "docs" / "RESEARCH_SUMMARY.md"))
 
     # findings (hand-written analysis)
     if notes_path.exists():

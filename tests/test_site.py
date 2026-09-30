@@ -69,6 +69,11 @@ def test_site_adds_further_runs_with_a_head_to_head(tmp_path):
              "lane_fn_iou50": 1} for s in (1, 2) for v, f in (("lite_baseline", 0.5), ("lite_v05", 0.7))]
     pd.DataFrame(rows).to_csv(lite / "all_results.csv", index=False)
     (lite / "config_resolved.yaml").write_text("description: longer lite run\ntrain: {epochs: 16}\n", encoding="utf-8")
-    text = build_site([main, lite], tmp_path / "site", "T").read_text(encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    summary.write_text("# s\n## Challenges\n- **small** data\n## Next steps\n1. full run\n", encoding="utf-8")
+    text = build_site([main, lite], tmp_path / "site", "T", summary=summary).read_text(encoding="utf-8")
     assert "Head to head on the held-out roads" in text and "longer lite run" in text
     assert "Lite v0.5 warped (16 ep)" in text and "UFLD baseline (? ep)" in text
+    # the one-screen overview comes first and takes the lite family from the longer run
+    assert text.index('id="summary"') < text.index('id="results"')
+    assert "<strong>small</strong> data" in text and "<ol><li>full run</li></ol>" in text

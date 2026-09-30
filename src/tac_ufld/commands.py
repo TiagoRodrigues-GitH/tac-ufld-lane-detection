@@ -113,6 +113,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--extra", nargs="*", default=[], help="extra JSON/Markdown reports to embed (benchmarks, checks)")
     p.add_argument("--notes", help="Markdown file whose '- ' bullets are the findings (default docs/PILOT_FINDINGS.md)")
     p.add_argument("--roadmap", help="roadmap Markdown (default docs/ROADMAP.md)")
+    p.add_argument("--summary", help="challenges / next steps Markdown for the overview (default docs/RESEARCH_SUMMARY.md)")
 
     p = sub.add_parser("package", help="supervisor hand-off ZIP")
     p.add_argument("--out", default=str(PROJECT_ROOT / "dist"))
@@ -478,7 +479,8 @@ def cmd_site(args) -> int:
 
     print(build_site([Path(r) for r in args.runs], Path(args.out), args.title, [Path(e) for e in args.extra],
                      notes=Path(args.notes) if args.notes else None,
-                     roadmap=Path(args.roadmap) if args.roadmap else None))
+                     roadmap=Path(args.roadmap) if args.roadmap else None,
+                     summary=Path(args.summary) if args.summary else None))
     return 0
 
 
