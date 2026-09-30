@@ -617,6 +617,97 @@ def _roadmap_section(path: Path) -> str:
             f'{html_phases}</section>')
 
 
+def _temporal_block(run: Path, df: pd.DataFrame) -> str:
+    """Paired comparisons (plain and equal-training), Kalman reference, carried
+    state and the test-time history ablation of one run, as HTML."""
+    report = run / "report"
+    paired = _read(report / "paired_tests_test_tuned.csv")
+    temporal_part = ""
+    if paired is not None and not paired.empty:
+        pm = paired[paired["metric"] == "lane_f1_iou50"]
+        plain = pm[~pm["reference"].astype(str).str.endswith("_ct") & ~pm["variant"].astype(str).str.endswith("_ct")]
+        budget = pm[pm["reference"].astype(str).str.endswith("_ct") | pm["variant"].astype(str).str.endswith("_ct")]
+        sub = df[(df["split"] == "test") & (df["protocol"] == "tuned") & (df["input"] == "full")]
+
+        def deltas(frame: pd.DataFrame) -> list[dict]:
+            rows = []
+            for r in frame.itertuples():
+                a = sub[sub["variant"] == r.variant].set_index("seed")["lane_f1_iou50"]
+                b = sub[sub["variant"] == r.reference].set_index("seed")["lane_f1_iou50"]
+                common = sorted(set(a.index) & set(b.index))
+                rows.append({"label": f"{_label(r.variant)} − {_label(r.reference)}", "mean": float(r.mean_delta),
+                             "seeds": [float(a[c] - b[c]) for c in common]})
+            return rows
+
+        temporal_part += (f'<div class="panel"><h3>Temporal model minus its single-frame baseline (held-out lane F1)</h3>'
+                          f'{delta_chart(deltas(plain), label_w=280)}</div>{paired_table(plain, "Temporal model")}')
+        if not budget.empty:
+            temporal_part += ('<h3>Equal-training control</h3><p class="lede">Temporal models start from their '
+                              'baseline\'s best checkpoint and train further. The +CT baseline gets the same extra '
+                              'training; a temporal gain that survives this comparison is not an effect of more epochs.</p>'
+                              f'<div class="panel">{delta_chart(deltas(budget), label_w=280)}</div>{paired_table(budget)}')
+    kalman = _read(report / "kalman_reference.csv")
+    kpaired = _read(report / "paired_tests_kalman.csv")
+    if kalman is not None and not kalman.empty:
+        k = kalman[kalman["metric"] == "lane_f1_iou50"]
+        j = kalman[kalman["metric"] == "jitter_px"].set_index("variant")
+        body = "".join(f'<tr><td>{esc(_label(r.variant))}</td><td class="num">{r.mean:.3f}'
+                       + (f" ± {r.std:.3f}" if np.isfinite(r.std) else "")
+                       + f'</td><td class="num">{fmt(j.loc[r.variant, "mean"], 2) if r.variant in j.index else "n/a"}</td></tr>'
+                       for r in k.itertuples())
+        temporal_part += ('<h3>Against the Kalman tracker</h3><p class="lede">The same predictions filtered by the '
+                          'output Kalman tracker (tuned on validation). This is what time gives almost for free; a '
+                          'learned temporal model should beat its baseline + Kalman.</p><div class="scroll"><table><thead>'
+                          '<tr><th>Model</th><th class="num">Held-out lane F1</th><th class="num">Jitter px</th></tr>'
+                          f'</thead><tbody>{body}</tbody></table></div>' + paired_table(kpaired))
+    carry = _read(report / "carry_state.csv")
+    if carry is not None and not carry.empty:
+        col = [c for c in carry.columns if c.startswith("mean_gain")][0]
+        body = "".join(f'<tr><td>{esc(_label(r.variant))}</td><td class="num">{getattr(r, col):+.4f}</td>'
+                       f'<td class="num">{int(r.n_seeds)}</td></tr>' for r in carry.itertuples())
+        temporal_part += ('<h3>Recurrent models with a carried state</h3><p class="lede">Held-out lane F1 when the '
+                          'ConvGRU keeps one state per stream across the whole scene, minus the window mode used in '
+                          'training (a zero state at every clip).</p><div class="scroll"><table><thead><tr>'
+                          '<th>Model</th><th class="num">Carry − window</th><th class="num">Seeds</th></tr></thead>'
+                          f'<tbody>{body}</tbody></table></div>')
+    hist_tbl = _history_gain_table(report / "temporal_ablation.csv")
+    if hist_tbl:
+        temporal_part += ('<h3>Is it the history?</h3><p class="lede">Test-time ablation: history frames replaced by '
+                          'the current frame. The gain is what the real history contributes to each trained model.</p>'
+                          + hist_tbl)
+    return temporal_part
+
+
+def _extra_run_section(run: Path, main_run: Path, main_df: pd.DataFrame) -> str:
+    """A further run (e.g. the lite family with a longer budget): its results,
+    its temporal comparisons, and a head-to-head chart that puts its models
+    next to the other family's models from the main run."""
+    import yaml
+
+    df = pd.read_csv(run / "all_results.csv")
+    resolved = run / "config_resolved.yaml"
+    cfg = yaml.safe_load(resolved.read_text(encoding="utf-8")) if resolved.exists() else {}
+    main_cfg_path = main_run / "config_resolved.yaml"
+    main_cfg = yaml.safe_load(main_cfg_path.read_text(encoding="utf-8")) if main_cfg_path.exists() else {}
+    epochs = cfg.get("train", {}).get("epochs", "?")
+    main_epochs = main_cfg.get("train", {}).get("epochs", "?")
+    here = set(df["variant"])
+    families = {FAMILY[v] for v in here}
+    rows = _agg(df, "test", "tuned", "lane_f1_iou50")
+    others = [dict(r, label=f"{_label(r['variant'])} ({main_epochs} ep)") for r in _agg(main_df, "test", "tuned", "lane_f1_iou50")
+              if FAMILY[r["variant"]] not in families]
+    mine = [dict(r, label=f"{_label(r['variant'])} ({epochs} ep)") for r in rows]
+    head = (f'<div class="panel"><h3>Head to head on the held-out roads</h3>'
+            f'{bar_chart(others + mine, "lane F1 head to head", width=820, left=210)}'
+            f'<p class="lede">Same split, recipe and evaluation; the numbers in brackets are the maximum epochs of '
+            f'each run (early stopping may end sooner). The {", ".join(sorted(families))} models come from '
+            f'<code>{esc(run.name)}</code>, the others from <code>{esc(main_run.name)}</code>.</p></div>') if others else ""
+    title = {"elas_lite_long": "The lite family with a longer budget"}.get(run.name, f"Run {run.name}")
+    return (f'<section id="{esc(run.name)}"><h2>{esc(title)}</h2><p class="lede">{esc(cfg.get("description", ""))}</p>'
+            f'{head}<h3>Held-out test scenes (mean ± std over seeds)</h3>{results_table(df, "test", "tuned")}'
+            f'{_temporal_block(run, df)}</section>')
+
+
 def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None = None,
                notes: Path | None = None, roadmap: Path | None = None) -> Path:
     """``runs[0]`` is the run shown; ablation summaries, benchmarks and the demo
@@ -682,60 +773,7 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
 
     # does temporal context help?
     report = run / "report"
-    paired = _read(report / "paired_tests_test_tuned.csv")
-    temporal_part = ""
-    if paired is not None and not paired.empty:
-        pm = paired[paired["metric"] == "lane_f1_iou50"]
-        plain = pm[~pm["reference"].astype(str).str.endswith("_ct") & ~pm["variant"].astype(str).str.endswith("_ct")]
-        budget = pm[pm["reference"].astype(str).str.endswith("_ct") | pm["variant"].astype(str).str.endswith("_ct")]
-        sub = df[(df["split"] == "test") & (df["protocol"] == "tuned") & (df["input"] == "full")]
-
-        def deltas(frame: pd.DataFrame) -> list[dict]:
-            rows = []
-            for r in frame.itertuples():
-                a = sub[sub["variant"] == r.variant].set_index("seed")["lane_f1_iou50"]
-                b = sub[sub["variant"] == r.reference].set_index("seed")["lane_f1_iou50"]
-                common = sorted(set(a.index) & set(b.index))
-                rows.append({"label": f"{_label(r.variant)} − {_label(r.reference)}", "mean": float(r.mean_delta),
-                             "seeds": [float(a[c] - b[c]) for c in common]})
-            return rows
-
-        temporal_part += (f'<div class="panel"><h3>Temporal model minus its single-frame baseline (held-out lane F1)</h3>'
-                          f'{delta_chart(deltas(plain), label_w=280)}</div>{paired_table(plain, "Temporal model")}')
-        if not budget.empty:
-            temporal_part += ('<h3>Equal-training control</h3><p class="lede">Temporal models start from their '
-                              'baseline\'s best checkpoint and train further. The +CT baseline gets the same extra '
-                              'training; a temporal gain that survives this comparison is not an effect of more epochs.</p>'
-                              f'<div class="panel">{delta_chart(deltas(budget), label_w=280)}</div>{paired_table(budget)}')
-    kalman = _read(report / "kalman_reference.csv")
-    kpaired = _read(report / "paired_tests_kalman.csv")
-    if kalman is not None and not kalman.empty:
-        k = kalman[kalman["metric"] == "lane_f1_iou50"]
-        j = kalman[kalman["metric"] == "jitter_px"].set_index("variant")
-        body = "".join(f'<tr><td>{esc(_label(r.variant))}</td><td class="num">{r.mean:.3f}'
-                       + (f" ± {r.std:.3f}" if np.isfinite(r.std) else "")
-                       + f'</td><td class="num">{fmt(j.loc[r.variant, "mean"], 2) if r.variant in j.index else "n/a"}</td></tr>'
-                       for r in k.itertuples())
-        temporal_part += ('<h3>Against the Kalman tracker</h3><p class="lede">The same predictions filtered by the '
-                          'output Kalman tracker (tuned on validation). This is what time gives almost for free; a '
-                          'learned temporal model should beat its baseline + Kalman.</p><div class="scroll"><table><thead>'
-                          '<tr><th>Model</th><th class="num">Held-out lane F1</th><th class="num">Jitter px</th></tr>'
-                          f'</thead><tbody>{body}</tbody></table></div>' + paired_table(kpaired))
-    carry = _read(report / "carry_state.csv")
-    if carry is not None and not carry.empty:
-        col = [c for c in carry.columns if c.startswith("mean_gain")][0]
-        body = "".join(f'<tr><td>{esc(_label(r.variant))}</td><td class="num">{getattr(r, col):+.4f}</td>'
-                       f'<td class="num">{int(r.n_seeds)}</td></tr>' for r in carry.itertuples())
-        temporal_part += ('<h3>Recurrent models with a carried state</h3><p class="lede">Held-out lane F1 when the '
-                          'ConvGRU keeps one state per stream across the whole scene, minus the window mode used in '
-                          'training (a zero state at every clip).</p><div class="scroll"><table><thead><tr>'
-                          '<th>Model</th><th class="num">Carry − window</th><th class="num">Seeds</th></tr></thead>'
-                          f'<tbody>{body}</tbody></table></div>')
-    hist_tbl = _history_gain_table(report / "temporal_ablation.csv")
-    if hist_tbl:
-        temporal_part += ('<h3>Is it the history?</h3><p class="lede">Test-time ablation: history frames replaced by '
-                          'the current frame. The gain is what the real history contributes to each trained model.</p>'
-                          + hist_tbl)
+    temporal_part = _temporal_block(run, df)
     if temporal_part:
         n = len(seeds)
         s.append('<section id="temporal"><h2>Does temporal context help?</h2><p class="lede">Each temporal model is '
@@ -760,6 +798,12 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
                  'frame-level subsets) and jitter, the mean frame-to-frame change of the predicted lane position '
                  '(lower is steadier; it also contains real lane motion).</p><div class="scroll"><table><thead><tr>'
                  f'<th>Model</th>{heads}</tr></thead><tbody>{"".join(body)}</tbody></table></div></section>')
+
+    # further runs (e.g. the lite family with a longer budget)
+    for extra_run in runs[1:]:
+        extra_run = extra_run if extra_run.is_absolute() else PROJECT_ROOT / extra_run
+        if (extra_run / "all_results.csv").exists():
+            s.append(_extra_run_section(extra_run, run, df))
 
     # ablations
     s.append(_augmentation_section(results_root))

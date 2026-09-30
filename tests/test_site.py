@@ -58,3 +58,17 @@ def test_bar_chart_is_to_scale():
     svg = bar_chart([{"variant": "ufld_baseline", "mean": 0.5, "seeds": [0.4, 0.6]}], "f1", width=760)
     width = float(re.search(r'<rect class="ufld" x="150" y="[\d.]+" width="([\d.]+)"', svg).group(1))
     assert abs(width - (760 - 150 - 60) * 0.5) < 0.2
+
+
+def test_site_adds_further_runs_with_a_head_to_head(tmp_path):
+    main = _fake_run(tmp_path)
+    lite = tmp_path / "lite_long"
+    (lite / "report").mkdir(parents=True)
+    rows = [{"seed": s, "variant": v, "split": "test", "protocol": "tuned", "input": "full", "lane_f1_iou50": f,
+             "lane_f1_iou35": f, "pixel_f1": 0.3, "anchor_f1": 0.5, "jitter_px": 2.0, "lane_fp_iou50": 1,
+             "lane_fn_iou50": 1} for s in (1, 2) for v, f in (("lite_baseline", 0.5), ("lite_v05", 0.7))]
+    pd.DataFrame(rows).to_csv(lite / "all_results.csv", index=False)
+    (lite / "config_resolved.yaml").write_text("description: longer lite run\ntrain: {epochs: 16}\n", encoding="utf-8")
+    text = build_site([main, lite], tmp_path / "site", "T").read_text(encoding="utf-8")
+    assert "Head to head on the held-out roads" in text and "longer lite run" in text
+    assert "Lite v0.5 warped (16 ep)" in text and "UFLD baseline (? ep)" in text
