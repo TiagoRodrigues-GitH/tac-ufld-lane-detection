@@ -625,8 +625,12 @@ def _temporal_block(run: Path, df: pd.DataFrame) -> str:
     temporal_part = ""
     if paired is not None and not paired.empty:
         pm = paired[paired["metric"] == "lane_f1_iou50"]
-        plain = pm[~pm["reference"].astype(str).str.endswith("_ct") & ~pm["variant"].astype(str).str.endswith("_ct")]
-        budget = pm[pm["reference"].astype(str).str.endswith("_ct") | pm["variant"].astype(str).str.endswith("_ct")]
+        ref, var = pm["reference"].astype(str), pm["variant"].astype(str)
+        is_ct = ref.str.endswith("_ct") | var.str.endswith("_ct")
+        is_static = ref.str.endswith("_static") | var.str.endswith("_static")
+        plain = pm[~is_ct & ~is_static]
+        budget = pm[is_ct & ~is_static]
+        capacity = pm[is_static & ~is_ct]
         sub = df[(df["split"] == "test") & (df["protocol"] == "tuned") & (df["input"] == "full")]
 
         def deltas(frame: pd.DataFrame) -> list[dict]:
@@ -646,6 +650,14 @@ def _temporal_block(run: Path, df: pd.DataFrame) -> str:
                               'baseline\'s best checkpoint and train further. The +CT baseline gets the same extra '
                               'training; a temporal gain that survives this comparison is not an effect of more epochs.</p>'
                               f'<div class="panel">{delta_chart(deltas(budget), label_w=280)}</div>{paired_table(budget)}')
+        if not capacity.empty:
+            temporal_part += ('<h3>Capacity control: extra layers or earlier frames?</h3><p class="lede">Lite v0.5 '
+                              'static is lite v0.5 with every history frame replaced by the current frame, in training '
+                              'and at test time: the same layers, warm start and budget, but no temporal information. '
+                              '"Lite v0.5 − static" is what the earlier frames add; "static − baseline" is what the '
+                              'extra fusion layers add on their own.</p>'
+                              f'<div class="panel">{delta_chart(deltas(capacity), label_w=280)}</div>'
+                              f'{paired_table(capacity)}')
     kalman = _read(report / "kalman_reference.csv")
     kpaired = _read(report / "paired_tests_kalman.csv")
     if kalman is not None and not kalman.empty:
