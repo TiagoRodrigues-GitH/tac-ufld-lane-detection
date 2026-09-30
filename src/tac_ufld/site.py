@@ -49,7 +49,7 @@ CSS = """
 }
 * { box-sizing: border-box; }
 body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); margin: 0; }
-.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 20px; padding-block: 0 64px; display: grid; gap: 48px; }
+main.wrap { max-width: 1080px; margin: 0 auto; padding-inline: 20px; padding-block: 0 64px; display: grid; gap: 48px; }
 header.top { display: grid; gap: 12px; padding-block: 32px 24px; border-bottom: 3px solid var(--accent); }
 .eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent-ink); }
 h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: -.01em; }
@@ -143,12 +143,16 @@ footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--rul
 .kpi .l { font-size: 13px; line-height: 1.45; color: var(--muted); }
 .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; }
 .charts > .panel, .plan > .panel { align-content: start; }
+.en { display: block; color: var(--muted); font-size: 12.5px; font-weight: 400; }
+th .en { text-transform: none; letter-spacing: 0; font-family: var(--body); }
+.h2en { font-size: 16px; margin-top: 4px; font-family: var(--body); }
+table.choice td.wrap { min-width: 190px; } table.choice td { vertical-align: top; }
 .plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
 .plan ul, .plan ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
 .plan li { font-size: 14.5px; }
 svg .clean { fill: var(--bg); stroke: var(--ink); stroke-width: 1.6; } svg .hit { stroke: var(--bad); stroke-width: 2; opacity: .55; }
 @media (max-width: 720px) { .card .body { grid-template-columns: 1fr; gap: 8px; } .card .cost { margin-left: 0; } }
-@media (max-width: 560px) { .wrap { padding-inline: 16px; } h2 { font-size: 23px; }
+@media (max-width: 560px) { main.wrap { padding-inline: 16px; } h2 { font-size: 23px; }
   .phase li { grid-template-columns: 1fr; gap: 4px; } }
 """
 
@@ -812,19 +816,15 @@ def _md_lists(path: Path) -> dict[str, list[str]]:
     return out
 
 
-def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summary: Path | None) -> str:
-    """One-screen overview for a short presentation: key figures and the four
-    most telling charts, all computed from the run folders, plus the
-    hand-written challenges and next steps (``docs/RESEARCH_SUMMARY.md``)."""
-    metric = "lane_f1_iou50"
-    root = run.parent
-    report = run / "report"
-
+def _family_views(run: Path, df: pd.DataFrame, extra_runs: list[Path]):
+    """Held-out test rows of the main run, of a further lite-only run (e.g. a
+    longer lite training) when given, both combined (the lite family taken
+    from the further run), and the efficiency table of both runs."""
     def test_rows(frame: pd.DataFrame) -> pd.DataFrame:
         return frame[(frame["split"] == "test") & (frame["protocol"] == "tuned") & (frame["input"] == "full")]
 
     main = test_rows(df)
-    lite_run, lite = None, None  # the lite family from a longer run, when one is given
+    lite_run, lite = None, None
     for r in extra_runs:
         r = r if r.is_absolute() else PROJECT_ROOT / r
         if (r / "all_results.csv").exists():
@@ -833,11 +833,22 @@ def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summar
                 lite_run, lite = r, d
     both = pd.concat([main[main["variant"].map(FAMILY) != ("lite" if lite is not None else "none")],
                       lite if lite is not None else main.iloc[0:0]], ignore_index=True)
-    f1 = both.groupby("variant")[metric].mean()
-    seeds = lambda frame, v: frame[frame["variant"] == v].sort_values("seed")[metric].astype(float).tolist()
-    effs = [e for e in (_read(report / "efficiency.csv"),
+    effs = [e for e in (_read(run / "report" / "efficiency.csv"),
                         _read(lite_run / "report" / "efficiency.csv") if lite_run else None) if e is not None]
     eff = pd.concat(effs).drop_duplicates("variant", keep="last").set_index("variant") if effs else None
+    return main, lite_run, lite, both, eff
+
+
+def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summary: Path | None) -> str:
+    """One-screen overview for a short presentation: key figures and the four
+    most telling charts, all computed from the run folders, plus the
+    hand-written challenges and next steps (``docs/RESEARCH_SUMMARY.md``)."""
+    metric = "lane_f1_iou50"
+    root = run.parent
+    report = run / "report"
+    main, lite_run, lite, both, eff = _family_views(run, df, extra_runs)
+    f1 = both.groupby("variant")[metric].mean()
+    seeds = lambda frame, v: frame[frame["variant"] == v].sort_values("seed")[metric].astype(float).tolist()
     temporal_ufld = [v for v in f1.index if FAMILY.get(v) == "ufld" and VARIANTS[v].temporal]
     kpis, panels = [], []
 
@@ -966,8 +977,202 @@ def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summar
             + (f'<div class="plan">{lists}</div>' if lists else "") + "</section>")
 
 
+def _bi(pt: str, en: str) -> str:
+    """Portuguese first, English below it in muted text (both already HTML)."""
+    return f'<span lang="pt">{pt}</span><span class="en" lang="en">{en}</span>'
+
+
+def _pt(text: str) -> str:
+    """Decimal comma for numbers inside Portuguese text."""
+    return re.sub(r"(?<![\w.])(\d+)\.(\d+)", r"\1,\2", text)  # not in names like v0.3
+
+
+def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: Path | None) -> str:
+    """Which model to compare with the baseline: per situation, which model
+    beats the UFLD baseline (numbers computed from the runs), a side-by-side
+    table of the candidates, and the hand-written recommendation and model
+    notes (``docs/MODEL_CHOICE.md``). Portuguese first, English below."""
+    import yaml
+
+    metric, base, occ = "lane_f1_iou50", "ufld_baseline", "occlude"
+    main, lite_run, lite, both, eff = _family_views(run, df, extra_runs)
+    f1 = both.groupby("variant")[metric].mean()
+    if base not in f1:
+        return ""
+    sources = [run] + ([lite_run] if lite_run else [])
+    own = lambda source, v: not (source == run and lite_run is not None and FAMILY.get(v) == "lite")
+    frame_of = lambda v: lite if lite is not None and FAMILY[v] == "lite" else main
+    seed_f1 = lambda v: frame_of(v)[frame_of(v)["variant"] == v].set_index("seed")[metric].astype(float)
+    rob, rob_seed, hist_gain = {}, {}, {}
+    for source in sources:  # every number comes from the run that trained the model
+        s = _read(source / "report" / "robustness_summary.csv")
+        ps = _read(source / "report" / "robustness.csv")
+        ta = _read(source / "report" / "temporal_ablation.csv")
+        for r in ([] if s is None else s[s["input"] == "degraded"].itertuples()):
+            if own(source, r.variant):
+                rob[(r.variant, r.op)] = float(r.lane_f1)
+        for r in ([] if ps is None else ps[ps["input"] == "degraded"].itertuples()):
+            if own(source, r.variant):
+                rob_seed[(r.variant, r.op, int(r.seed))] = float(r.lane_f1)
+        if ta is not None:
+            col = next(c for c in ta.columns if c.startswith("mean_gain"))
+            hist_gain.update({r.variant: float(getattr(r, col)) for r in ta.itertuples() if own(source, r.variant)})
+
+    def rob_delta_seeds(a: str, b: str, op: str) -> pd.Series:
+        sa = pd.Series({s: v for (m, o, s), v in rob_seed.items() if m == a and o == op}, dtype=float)
+        sb = pd.Series({s: v for (m, o, s), v in rob_seed.items() if m == b and o == op}, dtype=float)
+        return (sa - sb).dropna()
+
+    L = lambda v: esc(LABELS[v])
+    temporal = [v for v in f1.index if FAMILY[v] == "ufld" and VARIANTS[v].temporal]
+    yes = lambda every: ("Sim, em todas as sementes", "Yes, in every seed") if every else ("Sim, na média", "Yes, on average")
+    rows = []  # (situation, verdict, best model, numbers), each a (pt, en) pair
+
+    if temporal:  # 1. clean frames
+        best = max(temporal, key=lambda v: f1[v])
+        d = f1[best] - f1[base]
+        hg = hist_gain.get(best, float("nan"))
+        every = bool(((seed_f1(best) - seed_f1(base)).dropna() > 0).all())
+        temporal_gain = d > 0 and every and np.isfinite(hg) and hg >= 0.01
+        rows.append((("Quadros limpos", "Clean frames"),
+                     yes(True) if temporal_gain else ("Não claramente", "Not clearly"),
+                     (L(best), L(best)) if temporal_gain else ("nenhum ainda", "none yet"),
+                     (f"{L(best)}: {d:+.3f} ({f1[best]:.3f} × {f1[base]:.3f})"
+                      + (f"; sem o histórico perde só {hg:.3f}" if np.isfinite(hg) else "")
+                      + ("" if temporal_gain or not np.isfinite(hg) else ", então o ganho não é temporal"),
+                      f"{L(best)}: {d:+.3f} ({f1[best]:.3f} vs {f1[base]:.3f})"
+                      + (f"; without its history it loses only {hg:.3f}" if np.isfinite(hg) else "")
+                      + ("" if temporal_gain or not np.isfinite(hg) else ", so the gain is not temporal"))))
+    occ_d = {v: rob[(v, occ)] - rob[(base, occ)] for v in temporal if (v, occ) in rob and (base, occ) in rob}
+    if occ_d:  # 2. occluded current frame
+        ranked = sorted(occ_d, key=lambda v: -occ_d[v])
+        best = ranked[0]
+        every = bool(len(rob_delta_seeds(best, base, occ)) and (rob_delta_seeds(best, base, occ) > 0).all())
+        top = ", ".join(f"{L(v)} {occ_d[v]:+.3f}" for v in ranked[:3])
+        ct = (f"; controle com o mesmo treino {rob[('ufld_baseline_ct', occ)]:.3f}",
+              f"; equal-training control {rob[('ufld_baseline_ct', occ)]:.3f}") if ("ufld_baseline_ct", occ) in rob else ("", "")
+        rows.append((("Quadro atual ocluído (histórico limpo)", "Occluded current frame (clean history)"),
+                     yes(every) if occ_d[best] > 0 else ("Não", "No"), (L(best), L(best)),
+                     (f"{top} (baseline {rob[(base, occ)]:.3f}{ct[0]})", f"{top} (baseline {rob[(base, occ)]:.3f}{ct[1]})")))
+    other = [(v, op, rob[(v, op)] - rob[(base, op)]) for v in temporal for op in ("blur", "darken", "noise")
+             if (v, op) in rob and (base, op) in rob]
+    if other:  # 3. other corruptions
+        lo, hi = min(d for *_, d in other), max(d for *_, d in other)
+        clear = hi >= 0.03
+        best_v, best_op, _ = max(other, key=lambda x: x[2])
+        rows.append((("Quadro atual borrado, escuro ou com ruído", "Blurred, dark or noisy current frame"),
+                     ("Sim", "Yes") if clear else ("Não", "No"),
+                     (L(best_v), L(best_v)) if clear else ("nenhum", "none"),
+                     (f"todas as diferenças entre {lo:+.3f} e {hi:+.3f}", f"every difference between {lo:+.3f} and {hi:+.3f}")))
+    cond = _read(run / "report" / "test_conditions.csv")
+    if cond is not None:  # 4. the scene tagged as occluded (natural occlusions)
+        c = cond[cond["metric"] == "condition_f1_iou50_occlusion"].set_index("variant")["mean"]
+        cands = [v for v in temporal if v in c.index]
+        if base in c.index and cands:
+            best = max(cands, key=lambda v: c[v])
+            ctx = (f"; +CT {c['ufld_baseline_ct']:.3f}" if "ufld_baseline_ct" in c.index else "")
+            rows.append((("Cena de teste com oclusões reais", "Held-out scene with real occlusions"),
+                         ("Sim, mas é uma única cena", "Yes, but it is a single scene") if c[best] > c[base] else ("Não", "No"),
+                         (L(best), L(best)),
+                         (f"{L(best)} {c[best]:.3f} × baseline {c[base]:.3f}{ctx}",
+                          f"{L(best)} {c[best]:.3f} vs baseline {c[base]:.3f}{ctx}")))
+    kal = _read(run / "report" / "kalman_reference.csv")
+    if kal is not None and not kal.empty:  # 5. smoothness
+        k = kal[kal["metric"] == "jitter_px"].set_index("variant")["mean"]
+        if base in k.index and base + "+kf" in k.index:
+            learned = [k[v] for v in temporal if v in k.index]
+            red = 100 * (1 - k[base + "+kf"] / k[base])
+            learned_wins = bool(learned) and min(learned) < 0.9 * k[base]
+            rows.append((("Estabilidade (jitter)", "Smoothness (jitter)"),
+                         ("Sim", "Yes") if learned_wins else ("Não por um modelo aprendido", "Not by a learned model"),
+                         ("filtro de Kalman na saída", "Kalman filter on the output"),
+                         (f"baseline {k[base]:.2f} px → {k[base + '+kf']:.2f} px com Kalman (−{red:.0f} %); "
+                          f"modelos temporais {min(learned):.2f}–{max(learned):.2f} px",
+                          f"baseline {k[base]:.2f} px → {k[base + '+kf']:.2f} px with Kalman (−{red:.0f} %); "
+                          f"temporal models {min(learned):.2f}–{max(learned):.2f} px")))
+    lv = "lite_v05"
+    if lv in f1 and eff is not None and lv in eff.index and (lv, occ) in rob and (base, occ) in rob:  # 6. lightweight
+        dc, do = f1[lv] - f1[base], rob[(lv, occ)] - rob[(base, occ)]
+        pb, pl = eff.loc[base, "params_millions"], eff.loc[lv, "params_millions"]
+
+        def epochs(r: Path | None) -> str:
+            p = (r or run) / "config_resolved.yaml"
+            return str(yaml.safe_load(p.read_text(encoding="utf-8")).get("train", {}).get("epochs", "?")) if p.exists() else "?"
+
+        verdict = (("Sob oclusão sim; em quadros limpos não", "Under occlusion yes; on clean frames no") if do > 0 >= dc
+                   else yes(True) if do > 0 and dc > 0 else ("Não", "No"))
+        rows.append((("Modelo leve para embarcado (× UFLD baseline)", "Lightweight model for embedded use (vs UFLD baseline)"),
+                     verdict, (L(lv), L(lv)),
+                     (f"limpos {dc:+.3f}, ocluídos {do:+.3f}, {pb / pl:.0f}× menos parâmetros ({pl:.1f} M × {pb:.1f} M); "
+                      f"treinos diferentes: até {epochs(lite_run)} × {epochs(run)} épocas",
+                      f"clean {dc:+.3f}, occluded {do:+.3f}, {pb / pl:.0f}× fewer parameters ({pl:.1f} M vs {pb:.1f} M); "
+                      f"different training: up to {epochs(lite_run)} vs {epochs(run)} epochs")))
+    ls = "lite_v05_static"
+    if (lv, occ) in rob and (ls, occ) in rob:  # 7. does the lite model use its history?
+        ds = rob_delta_seeds(lv, ls, occ)
+        per = " / ".join(f"{d:+.3f}" for d in ds)
+        rows.append((("O modelo leve usa o histórico? (× mesmas camadas sem histórico, com oclusão)",
+                      "Does the lite model use its history? (vs same layers without history, occluded)"),
+                     yes(bool(len(ds) and (ds > 0).all())) if rob[(lv, occ)] > rob[(ls, occ)] else ("Não", "No"),
+                     (L(lv), L(lv)),
+                     (f"{rob[(lv, occ)]:.3f} × {rob[(ls, occ)]:.3f} (por semente {per})",
+                      f"{rob[(lv, occ)]:.3f} vs {rob[(ls, occ)]:.3f} (per seed {per})")))
+    if not rows:
+        return ""
+    head = ("<tr>" + "".join(f"<th>{_bi(p, e)}</th>" for p, e in (("Situação", "Situation"),
+                                                                 ("Supera a baseline?", "Better than the baseline?"),
+                                                                 ("Melhor modelo", "Best model"), ("Números", "Numbers")))
+            + "</tr>")
+    body = "".join("<tr>" + "".join(f'<td class="wrap">{_bi(_pt(p), e)}</td>' for p, e in row) + "</tr>" for row in rows)
+
+    plan = _md_lists(notes) if notes is not None and notes.exists() else {}
+    model_notes = {}
+    for item in plan.get("Notas por modelo", []):
+        m = re.match(r"`(\w+)`:\s*(.*?)\s*\|\|\s*(.*)", item)
+        if m:
+            model_notes[m.group(1)] = (m.group(2), m.group(3))
+    cand = []
+    for v in [v for v in ORDER if v in f1.index]:
+        o = rob.get((v, occ))
+        do = o - rob[(base, occ)] if o is not None and (base, occ) in rob else None
+        params = f"{eff.loc[v, 'params_millions']:.1f}" if eff is not None and v in eff.index else "n/a"
+        hg = hist_gain.get(v)
+        note = model_notes.get(v, ("", ""))
+        cand.append(f'<tr><td><span class="fam {FAMILY[v]}"></span>{L(v)}</td><td class="num">{fmt(f1[v])}</td>'
+                    f'<td class="num">{fmt(o) if o is not None else "n/a"}</td>'
+                    f'<td class="num">{"—" if v == base else (f"{do:+.3f}" if do is not None else "n/a")}</td>'
+                    f'<td class="num">{params}</td><td class="num">{f"{hg:.3f}" if hg is not None else "—"}</td>'
+                    f'<td class="wrap">{_bi(_md(note[0]), _md(note[1])) if note[0] else ""}</td></tr>')
+    cand_head = ("<tr>" + "".join(f'<th{c}>{_bi(p, e)}</th>' for p, e, c in (
+        ("Modelo", "Model", ""), ("F1 limpos", "Clean F1", ' class="num"'), ("F1 ocluídos", "Occluded F1", ' class="num"'),
+        ("Δ oclusão × baseline", "Δ occluded vs baseline", ' class="num"'), ("Parâmetros (M)", "Parameters (M)", ' class="num"'),
+        ("Perda sem histórico", "Cost without history", ' class="num"'), ("Nota", "Note", ""))) + "</tr>")
+    rec = "".join(f'<div class="panel" lang="{"pt" if lang == "Recomendação" else "en"}"><h3>{esc(lang)}</h3><ul>'
+                  + "".join(f"<li>{_md(i)}</li>" for i in plan[lang]) + "</ul></div>"
+                  for lang in ("Recomendação", "Recommendation") if plan.get(lang))
+    src = _bi(f"Modelos lite: execução <code>{esc(lite_run.name)}</code> (treino mais longo).",
+              f"Lite models: run <code>{esc(lite_run.name)}</code> (longer training).") if lite_run else ""
+    return ('<section id="choice"><h2>Qual modelo comparar com a baseline<span class="en h2en">Which model to compare '
+            'with the baseline</span></h2>'
+            '<p class="lede">' + _bi("Lane F1 nas cenas de teste nunca vistas, média de 2 sementes; o quadro atual "
+                                   "ocluído vem da avaliação de robustez (o histórico continua limpo). Resultados de "
+                                   "piloto: indicam a direção, não provam.",
+                                   "Lane F1 on the held-out scenes, mean of 2 seeds; the occluded current frame comes "
+                                   "from the robustness evaluation (the history stays clean). Pilot results: they "
+                                   "show the direction, they do not prove it.") + src + '</p>'
+            f'<div class="scroll"><table class="choice"><thead>{head}</thead><tbody>{body}</tbody></table></div>'
+            f'<div class="plan">{rec}</div>'
+            f'<h3>{_bi("Os candidatos lado a lado", "The candidates side by side")}</h3>'
+            f'<div class="scroll"><table><thead>{cand_head}</thead><tbody>{"".join(cand)}</tbody></table></div>'
+            '<p class="lede">' + _bi("“Perda sem histórico”: quanto o lane F1 cai quando o histórico é trocado pelo "
+                                   "quadro atual no teste (quadros limpos).",
+                                   "“Cost without history”: how much lane F1 drops when the history is replaced by "
+                                   "the current frame at test time (clean frames).") + "</p></section>")
+
+
 def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None = None,
-               notes: Path | None = None, roadmap: Path | None = None, summary: Path | None = None) -> Path:
+               notes: Path | None = None, roadmap: Path | None = None, summary: Path | None = None,
+               choice: Path | None = None) -> Path:
     """``runs[0]`` is the run shown; ablation summaries, benchmarks and the demo
     video are read from ``<results>/ablation_*``, ``<results>/benchmarks`` and
     ``<results>/demo`` next to it (``extra`` is reserved for further report files)."""
@@ -1008,6 +1213,8 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
 
     # one-screen overview (key figures, four charts, challenges, next steps)
     s.append(_summary_section(run, df, runs[1:], summary or PROJECT_ROOT / "docs" / "RESEARCH_SUMMARY.md"))
+    # which model to compare with the baseline (Portuguese first)
+    s.append(_choice_section(run, df, runs[1:], choice or PROJECT_ROOT / "docs" / "MODEL_CHOICE.md"))
 
     # findings (hand-written analysis)
     # (a Portuguese version next to the notes, ``<notes>.pt.md``, is shown first)

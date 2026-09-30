@@ -77,3 +77,20 @@ def test_site_adds_further_runs_with_a_head_to_head(tmp_path):
     # the one-screen overview comes first and takes the lite family from the longer run
     assert text.index('id="summary"') < text.index('id="results"')
     assert "<strong>small</strong> data" in text and "<ol><li>full run</li></ol>" in text
+
+
+def test_choice_section_is_bilingual_and_keeps_model_names(tmp_path):
+    from tac_ufld.site import _bi, _choice_section, _pt
+
+    assert _pt("UFLD v0.3 +0.114 (0.875 × 0.761)") == "UFLD v0.3 +0,114 (0,875 × 0,761)"
+    assert _bi("Sim", "Yes") == '<span lang="pt">Sim</span><span class="en" lang="en">Yes</span>'
+    run = _fake_run(tmp_path)
+    notes = tmp_path / "choice.md"
+    notes.write_text("## Recomendação\n- usar **v0.3**\n## Recommendation\n- use **v0.3**\n## Notas por modelo\n"
+                     "- `ufld_baseline`: referência || reference\n", encoding="utf-8")
+    df = pd.read_csv(run / "all_results.csv")
+    html = _choice_section(run, df, [], notes)
+    assert 'id="choice"' in html and "Qual modelo comparar com a baseline" in html
+    assert html.index('lang="pt"') < html.index('lang="en"')  # Portuguese first
+    assert "usar <strong>v0.3</strong>" in html and "referência" in html
+    assert "v0,3" not in html  # model names keep their dot
