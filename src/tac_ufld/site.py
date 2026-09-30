@@ -649,17 +649,24 @@ def _temporal_block(run: Path, df: pd.DataFrame) -> str:
     kalman = _read(report / "kalman_reference.csv")
     kpaired = _read(report / "paired_tests_kalman.csv")
     if kalman is not None and not kalman.empty:
-        k = kalman[kalman["metric"] == "lane_f1_iou50"]
-        j = kalman[kalman["metric"] == "jitter_px"].set_index("variant")
-        body = "".join(f'<tr><td>{esc(_label(r.variant))}</td><td class="num">{r.mean:.3f}'
-                       + (f" ± {r.std:.3f}" if np.isfinite(r.std) else "")
-                       + f'</td><td class="num">{fmt(j.loc[r.variant, "mean"], 2) if r.variant in j.index else "n/a"}</td></tr>'
-                       for r in k.itertuples())
+        piv = kalman.set_index(["variant", "metric"])["mean"]
+
+        def val(v: str, m: str, digits: int) -> str:
+            return fmt(piv[(v, m)], digits) if (v, m) in piv.index else "n/a"
+
+        models = [v for v in ORDER if v in set(kalman["variant"])]
+        body = "".join(f'<tr><td><span class="fam {FAMILY[v]}"></span>{esc(LABELS[v])}</td>'
+                       f'<td class="num">{val(v, "lane_f1_iou50", 3)}</td><td class="num">{val(v + "+kf", "lane_f1_iou50", 3)}</td>'
+                       f'<td class="num">{val(v, "jitter_px", 2)}</td><td class="num">{val(v + "+kf", "jitter_px", 2)}</td></tr>'
+                       for v in models)
+        kp = None if kpaired is None else kpaired[~kpaired["variant"].astype(str).str.endswith("+kf")]
         temporal_part += ('<h3>Against the Kalman tracker</h3><p class="lede">The same predictions filtered by the '
                           'output Kalman tracker (tuned on validation). This is what time gives almost for free; a '
-                          'learned temporal model should beat its baseline + Kalman.</p><div class="scroll"><table><thead>'
-                          '<tr><th>Model</th><th class="num">Held-out lane F1</th><th class="num">Jitter px</th></tr>'
-                          f'</thead><tbody>{body}</tbody></table></div>' + paired_table(kpaired))
+                          'learned temporal model should beat its baseline + Kalman (paired table below).</p>'
+                          '<div class="scroll"><table><thead><tr><th>Model</th><th class="num">Lane F1</th>'
+                          '<th class="num">Lane F1 + Kalman</th><th class="num">Jitter px</th>'
+                          f'<th class="num">Jitter px + Kalman</th></tr></thead><tbody>{body}</tbody></table></div>'
+                          + paired_table(kp, "Temporal model"))
     carry = _read(report / "carry_state.csv")
     if carry is not None and not carry.empty:
         col = [c for c in carry.columns if c.startswith("mean_gain")][0]
