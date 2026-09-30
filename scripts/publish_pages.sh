@@ -40,7 +40,7 @@ rm -f "$WT/page.html"   # embedding variant, not needed on Pages
 (
   cd "$WT"
   git add -A
-  git commit -m "Publish results page from $(git -C "$ROOT" rev-parse --short HEAD) ($RUN)" || echo "nothing to publish"
+  git commit -m "Publish results page from $(git -C "$ROOT" rev-parse --short HEAD)" || echo "nothing to publish"
   git push origin gh-pages
 )
 echo "Published. Enable Pages once: Settings -> Pages -> Deploy from a branch -> gh-pages / (root)."
