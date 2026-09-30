@@ -523,31 +523,35 @@ def _augmentation_section(root: Path) -> str:
     rows = []
     for arm in arms:
         vals = sub[sub["arm"] == arm][metric].to_numpy(dtype=float)
-        best_epochs = []
+        val_scores, best_epochs = [], []
         for h in sorted((root / f"ablation_augmentation__{arm}").glob("seed_*/history_ufld_baseline.csv")):
             hd = pd.read_csv(h)
-            best_epochs.append(int(hd.loc[hd[f"val_{metric}"].idxmax(), "epoch"]))
+            best = hd.loc[hd[f"val_{metric}"].idxmax()]
+            val_scores.append(float(best[f"val_{metric}"]))
+            best_epochs.append(int(best["epoch"]))
         verdict = ""
         if paired is not None and not paired.empty:
             p = paired[(paired["variant"] == f"{arm}/ufld_baseline") & (paired["metric"] == metric)]
             if len(p):
                 r = next(p.itertuples())
                 verdict = f'{r.mean_delta:+.3f} {_verdict(r)}'
-        rows.append((arm, vals, best_epochs, verdict))
-    rows.sort(key=lambda r: -np.nanmean(r[1]))
-    body = "".join(f'<tr><td>{esc(a.replace("_", " "))}</td><td class="num">{_mean_std(v, 3)}</td>'
-                   f'<td class="num">{", ".join(map(str, e)) or "n/a"}</td><td>{verdict or "reference"}</td></tr>'
-                   for a, v, e, verdict in rows)
+        rows.append((arm, vals, np.asarray(val_scores), best_epochs, verdict))
+    rows.sort(key=lambda r: -np.nanmean(r[2]) if len(r[2]) else 0.0)
+    body = "".join(f'<tr><td>{esc(a.replace("_", " "))}</td><td class="num">{_mean_std(val, 3)}</td>'
+                   f'<td class="num">{_mean_std(v, 3)}</td><td class="num">{", ".join(map(str, e)) or "n/a"}</td>'
+                   f'<td>{verdict or "reference"}</td></tr>' for a, v, val, e, verdict in rows)
     chart = bar_chart([{"variant": "ufld_baseline", "label": a.replace("_", " "), "mean": float(np.nanmean(v)),
-                        "seeds": v.tolist()} for a, v, _, _ in rows], "lane F1 per arm", width=820, left=210)
+                        "seeds": v.tolist()} for a, v, _, _, _ in rows], "lane F1 per arm", width=820, left=210)
     return ('<section id="overfitting"><h2>Fixing the UFLD overfitting</h2><p class="lede">The first pilot showed '
-            'every UFLD run peaking at epoch 1. Each arm below changes one thing in the UFLD baseline\'s training '
+            'every UFLD run peaking at epoch 1. Each arm below changes one thing in the training of the UFLD baseline '
             '(same split, seeds, epochs and evaluation) and is compared with the original recipe (photometric '
-            'augmentation). Held-out lane F1 at IoU 0.5; "best epochs" are the validation-selected epochs per seed. '
-            f'Three seeds cannot reach significance, so the verdicts are indicative.</p><div class="panel">{chart}</div>'
-            '<div class="scroll"><table><thead><tr><th>Arm</th><th class="num">Held-out lane F1</th>'
-            '<th class="num">Best epochs</th><th>Δ vs reference</th></tr></thead>'
-            f'<tbody>{body}</tbody></table></div></section>')
+            'augmentation). The recipe for later runs is chosen on the validation column; the held-out column is '
+            'reported, never used for choosing. "Best epochs" are the validation-selected epochs per seed; the '
+            '"more scenes" arm has its own, larger validation set. Three seeds cannot reach significance, so the '
+            f'verdicts are indicative.</p><div class="panel"><h3>Held-out lane F1 per arm</h3>{chart}</div>'
+            '<div class="scroll"><table><thead><tr><th>Arm</th><th class="num">Validation lane F1</th>'
+            '<th class="num">Held-out lane F1</th><th class="num">Best epochs</th><th>Held-out Δ vs reference</th>'
+            f'</tr></thead><tbody>{body}</tbody></table></div></section>')
 
 
 def _history_section(root: Path) -> str:
