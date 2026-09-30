@@ -12,8 +12,8 @@ accuracy question is answered under the full protocol.
 
 ## Phase 2: make a lightweight temporal model beat the UFLD baseline (v0.4)
 - [done] Fix the UFLD overfitting: geometric augmentation lifts the UFLD baseline from 0.07 to 0.86 held-out lane F1 (`configs/ablations/augmentation.yaml`, chosen on validation); extended photometric augmentation, flips and dropout + label smoothing do not help.
-- [progress] The other overfitting levers as single changes to the original recipe: a 10x lower backbone learning rate, frozen early layers, a smaller UFLD head, current-frame degradation and 8 more ELAS training scenes (remaining arms of the same ablation). Cross-dataset initialisation (`model.init_checkpoint`) is implemented for when CULane / TuSimple weights are available.
-- [progress] Longer history: grid of frame steps 1 to 15 and 2 to 5 frames with one shared leakage-safe split (`configs/ablations/history.yaml`).
+- [done] The other overfitting levers as single changes to the original recipe: a 10x lower backbone learning rate, frozen early layers, a smaller UFLD head, current-frame degradation and 8 more ELAS training scenes. None fixes the overfitting on its own (held-out lane F1 0.05 to 0.21, best epoch still 1 or 2); geometric augmentation stays the recipe. Cross-dataset initialisation (`model.init_checkpoint`) is implemented for when CULane / TuSimple weights are available.
+- [done] Longer history (`configs/ablations/history.yaml`, UFLD v0.4, 4 arms): steps of 2, 5 and 10 frames give the same gain over the baseline (about +0.03); 5 frames instead of 3 remove it. More arms of the grid (steps 1 to 15, 2 to 5 frames) can be added with `ablate --only`.
 - [done] Current-frame degradation: only the current frame is occluded, blurred, darkened or made noisy while the history stays clean, so a temporal model must use its history (`data.augmentation.current_frame_prob`).
 - [done] Align before fusing: UFLD v0.6 (lite v0.5's learned warp and gate on UFLD features).
 - [done] Recurrent state: UFLD v0.7 and lite v0.6 (ConvGRU); streaming can carry one state per camera (`--mode carry`).
@@ -21,7 +21,8 @@ accuracy question is answered under the full protocol.
 - [done] Evaluate where time should help: lane F1 per scene condition, jitter, and a validation-tuned Kalman tracker as the cheap temporal reference.
 - [done] Second pilot with the v0.4 models and recipe (`configs/elas_pilot_v2.yaml`): UFLD baseline 0.881, best temporal UFLD (v0.7) 0.895; the lite models need more epochs.
 - [done] Capacity control `lite_v05_static`: lite v0.5 fed the current frame in every position, to separate a temporal gain from the extra fusion layers.
-- [progress] Lite family with a longer budget (up to 16 epochs) and the capacity control (`configs/elas_lite_long.yaml`).
+- [done] Lite family with a longer budget (up to 16 epochs) and the capacity control (`configs/elas_lite_long.yaml`): lite v0.5 reaches 0.850 with 8x fewer parameters than UFLD; under an occluded current frame its history is worth +0.17 and +0.38 over the no-history control.
+- [done] Robustness evaluation: current frame occluded, blurred, darkened or noisy with a clean history. Under occlusion UFLD v0.3 keeps 0.875 lane F1 against 0.761 for the baseline, in both seeds.
 - [next] Train the recurrent models on long sequences so that one carried state per camera works (carry mode drifts after 3-frame training).
 
 ## Phase 3: full protocol (supervisor)
