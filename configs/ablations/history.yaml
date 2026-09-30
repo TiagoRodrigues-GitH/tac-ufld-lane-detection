@@ -16,7 +16,7 @@
 
 name: ablation_history
 description: "History length (frames) and spacing (step) for the temporal models, lite family (ELAS)."
-base_config: configs/elas_pilot.yaml
+base_config: configs/elas_pilot_v2.yaml   # v0.4 recipe: geometric augmentation + current-frame degradation
 variants: [lite_baseline, lite_v05]
 seeds: [1, 2]
 hpo: false
