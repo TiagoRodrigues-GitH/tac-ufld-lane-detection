@@ -679,6 +679,40 @@ def _temporal_block(run: Path, df: pd.DataFrame) -> str:
                           '<th class="num">Lane F1 + Kalman</th><th class="num">Jitter px</th>'
                           f'<th class="num">Jitter px + Kalman</th></tr></thead><tbody>{body}</tbody></table></div>'
                           + paired_table(kp, "Temporal model"))
+    robust = _read(report / "robustness_summary.csv")
+    if robust is not None and not robust.empty:
+        piv = robust.set_index(["variant", "input", "op"])["lane_f1"]
+        clean_f1 = robust.groupby("variant")["clean_lane_f1"].first()
+        ops = [o for o in ("occlude", "blur", "darken", "noise") if o in set(robust["op"])]
+        models = [v for v in ORDER if v in set(robust["variant"])]
+
+        def cell(v: str, inp: str, op: str) -> str:
+            return fmt(piv[(v, inp, op)], 3) if (v, inp, op) in piv.index else "n/a"
+
+        body = "".join(
+            f'<tr><td><span class="fam {FAMILY[v]}"></span>{esc(LABELS[v])}</td><td class="num">{fmt(clean_f1.get(v), 3)}</td>'
+            f'<td class="num"><strong>{cell(v, "degraded", "all")}</strong></td>'
+            + "".join(f'<td class="num">{cell(v, "degraded", o)}</td>' for o in ops)
+            + f'<td class="num">{cell(v, "degraded+kalman", "all")}</td></tr>' for v in models)
+        chart_rows = [{"variant": v, "mean": float(piv[(v, "degraded", "all")]),
+                       "seeds": []} for v in models if (v, "degraded", "all") in piv.index]
+        seeds_file = _read(report / "robustness.csv")
+        if seeds_file is not None:
+            for r in chart_rows:
+                s_ = seeds_file[(seeds_file["variant"] == r["variant"]) & (seeds_file["input"] == "degraded")
+                                & (seeds_file["op"] == "all")]
+                r["seeds"] = s_["lane_f1"].astype(float).tolist()
+        temporal_part += ('<h3>When the current frame is degraded</h3><p class="lede">The held-out test scenes again, '
+                          'but every current frame is corrupted (an occluding box, strong blur, darkening or noise; the '
+                          'same corruption for every model) while the earlier frames stay clean. This is where earlier '
+                          'frames should pay off: a single-frame model only sees the damaged image. Validation-tuned '
+                          'post-processing, nothing re-tuned.</p>'
+                          f'<div class="panel"><h3>Held-out lane F1 with a degraded current frame</h3>'
+                          f'{bar_chart(chart_rows, "lane F1 degraded")}</div>'
+                          '<div class="scroll"><table><thead><tr><th>Model</th><th class="num">Clean</th>'
+                          '<th class="num">Degraded</th>' + "".join(f'<th class="num">{o}</th>' for o in ops)
+                          + '<th class="num">Degraded + Kalman</th></tr></thead>'
+                          f'<tbody>{body}</tbody></table></div>')
     carry = _read(report / "carry_state.csv")
     if carry is not None and not carry.empty:
         col = [c for c in carry.columns if c.startswith("mean_gain")][0]
