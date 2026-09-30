@@ -32,6 +32,8 @@ RESULT_PATTERNS = ("config_resolved.yaml", "environment.json", "all_results.csv"
                    "*.md", "*.json",                                                # benchmark reports
                    "index.html", "assets/*.jpg")                                    # offline results page
 MAX_RESULT_FILE_MB = 5
+# the generated results pages (site/ is git-ignored): both languages, their images, nothing else
+SITE_PATTERNS = ("index.html", "assets/*.jpg", "pt/index.html", "pt/assets/*.jpg")
 
 
 def _git(*args: str) -> str:
@@ -63,7 +65,7 @@ def result_files(run: Path) -> list[Path]:
     return list(out)
 
 
-def build_package(out_dir: Path, include_results: list[Path]) -> tuple[Path, str]:
+def build_package(out_dir: Path, include_results: list[Path], include_site: bool = False) -> tuple[Path, str]:
     commit = _git("rev-parse", "--short", "HEAD").strip()
     dirty = bool(_git("status", "--porcelain").strip())
     stamp = dt.date.today().isoformat()
@@ -75,6 +77,11 @@ def build_package(out_dir: Path, include_results: list[Path]) -> tuple[Path, str
         run = run if run.is_absolute() else PROJECT_ROOT / run
         for p in result_files(run):
             entries.append((p, f"pilot_results/{run.name}/{p.relative_to(run).as_posix()}"))
+    site = PROJECT_ROOT / "site"
+    if include_site:  # opened offline with a browser: results_page/index.html, results_page/pt/index.html
+        for pattern in SITE_PATTERNS:
+            entries += [(q, f"results_page/{q.relative_to(site).as_posix()}") for q in sorted(site.glob(pattern))
+                        if q.is_file()]
     arcnames = [a for _, a in entries]
     duplicates = sorted({a for a in arcnames if arcnames.count(a) > 1})
     if duplicates:
@@ -90,7 +97,7 @@ def build_package(out_dir: Path, include_results: list[Path]) -> tuple[Path, str
             manifest.append(f"{hashlib.sha256(data).hexdigest()}  {len(data):>10}  {arc}")
         zf.writestr(f"{root}/MANIFEST.txt", "\n".join(manifest) + "\n")
     names = [a for _, a in entries]
-    leaks = [n for n in names if _excluded(Path(n)) and not n.startswith("pilot_results/")]
+    leaks = [n for n in names if _excluded(Path(n)) and not n.startswith(("pilot_results/", "results_page/"))]
     report = (f"{len(entries)} files, {total / 2**20:.1f} MB uncompressed, {zip_path.stat().st_size / 2**20:.1f} MB "
               f"zipped; git {commit}{' (dirty)' if dirty else ''}; "
               f"{sum(n.startswith('pilot_results/') for n in names)} result files from {len(include_results)} run(s)")

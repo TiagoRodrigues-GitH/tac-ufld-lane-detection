@@ -121,6 +121,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("package", help="supervisor hand-off ZIP")
     p.add_argument("--out", default=str(PROJECT_ROOT / "dist"))
     p.add_argument("--include-results", nargs="*", default=[], help="result folders whose reports (not checkpoints) to add")
+    p.add_argument("--include-site", action="store_true", help="add the built results pages (site/, site/pt/) as results_page/")
 
     p = sub.add_parser("doctor", help="environment, GPU and dependency checks")
     p.add_argument("--json", action="store_true")
@@ -492,7 +493,7 @@ def cmd_site(args) -> int:
 def cmd_package(args) -> int:
     from tac_ufld.package import build_package
 
-    path, report = build_package(Path(args.out), [Path(r) for r in args.include_results])
+    path, report = build_package(Path(args.out), [Path(r) for r in args.include_results], args.include_site)
     print(report)
     print(f"\nZIP: {path}")
     return 0
