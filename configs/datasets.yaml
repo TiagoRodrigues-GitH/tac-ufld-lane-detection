@@ -8,6 +8,11 @@
 #   python -m tac_ufld datasets --check         # parse every enabled dataset
 #   python -m tac_ufld run --dataset elas --config configs/elas_pilot.yaml
 #   python -m tac_ufld validate-dataset --dataset culane
+#   python scripts/check_dataset.py culane D:\datasets\CULane   # after downloading
+#   python scripts/smoke_datasets.py --datasets culane           # a few batches, every stage
+#
+# To use a dataset: set its root variable (e.g. CULANE_ROOT) and enabled: true.
+# Step-by-step: 'HOW TO SWITCH DATASETS' at the top of src/tac_ufld/cli.py.
 
 datasets:
   elas:
@@ -21,16 +26,19 @@ datasets:
     enabled: false
     root: "${CULANE_ROOT}"
     config: configs/culane.yaml
+    smoke_config: configs/culane_smoke.yaml
     description: "CULane (Pan et al. 2018), 4 lanes, official lists"
 
   tusimple:
     enabled: false
     root: "${TUSIMPLE_ROOT}"
     config: configs/tusimple.yaml
+    smoke_config: configs/tusimple_smoke.yaml
     description: "TuSimple lane benchmark, 4 lanes, 20-frame clips"
 
   openlane:
     enabled: false
     root: "${OPENLANE_ROOT}"
     config: configs/openlane.yaml
+    smoke_config: configs/openlane_smoke.yaml
     description: "OpenLane v1 (2D lanes), 4 attribute slots, Waymo segments"

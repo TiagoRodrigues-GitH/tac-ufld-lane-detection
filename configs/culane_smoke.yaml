@@ -1,0 +1,59 @@
+# CULane smoke test: a few batches through every stage (split, training,
+# post-processing tuning, evaluation, native CULane metric, latency). Numbers
+# are NOT results. Runs on the real data (CULANE_ROOT) or on the synthetic
+# copy built by `python scripts/smoke_datasets.py` when the data is absent.
+# Same geometry as configs/culane.yaml, so a pass also checks its shapes.
+
+name: culane_smoke
+output_dir: results
+device: auto
+
+data:
+  dataset: culane                  # DATASET-SPECIFIC: adapter (tac_ufld/data/culane.py)
+  root: "${CULANE_ROOT}"           # DATASET-SPECIFIC: folder holding driver_*/, laneseg_label_w16/, list/
+  img_h: 288                       # DATASET-SPECIFIC: official UFLD CULane input 288x800
+  img_w: 800
+  num_lanes: 4                     # DATASET-SPECIFIC: CULane annotates up to 4 lanes
+  num_row_anchors: 18              # DATASET-SPECIFIC: official UFLD CULane anchors 121..287
+  row_anchor_range: [0.4201, 0.9965]
+  griding_num: 200                 # DATASET-SPECIFIC: official UFLD CULane grid
+  num_frames: 3
+  temporal_step: 90                # DATASET-SPECIFIC: frame ids are video frames; clips store every 30th/90th
+  num_workers: 0
+  augmentation:
+    # Official UFLD training augmentation (cfzd/Ultra-Fast-Lane-Detection,
+    # data/dataloader.py): RandomRotate(6), RandomUDoffsetLABEL(100),
+    # RandomLROffsetLABEL(200), applied to every training image. Without
+    # geometric augmentation UFLD overfitted badly on ELAS (docs/PILOT_V2_FINDINGS.md).
+    geometric:
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.122            # DATASET-SPECIFIC: 200 px of the 1640-px source width
+      translate_y: 0.169            # DATASET-SPECIFIC: 100 px of the 590-px source height
+    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
+  split:
+    purge_frames: 180              # DATASET-SPECIFIC: >= temporal_step * (num_frames - 1)
+    max_train_frames: 32
+    max_val_frames: 16
+    max_test_frames: 16
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  pretrained: false
+
+train:
+  seeds: [1]
+  epochs: 1
+  batch_size: 4
+  early_stopping_patience: 0
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid: {threshold: [0.5], min_points: [2], poly_degree: [0]}
+  kalman_grid: {q: [1.0], alpha: [0.0]}
+  latency_runs: 2
+  n_visual_examples: 2
+  tensorboard: false

@@ -1,0 +1,64 @@
+# OpenLane (2D) smoke test: a few batches through every stage (split,
+# training, post-processing tuning, evaluation, native OpenLane-style F1,
+# latency). Numbers are NOT results. Runs on the real data (OPENLANE_ROOT) or
+# on the synthetic copy built by `python scripts/smoke_datasets.py`.
+# Same geometry as configs/openlane.yaml.
+
+name: openlane_smoke
+output_dir: results
+device: auto
+
+data:
+  dataset: openlane                # DATASET-SPECIFIC: adapter (tac_ufld/data/openlane.py)
+  root: "${OPENLANE_ROOT}"         # DATASET-SPECIFIC: folder holding images/ and lane3d_1000/ (or lane3d_300/)
+  img_h: 320                       # DATASET-SPECIFIC: 1920x1280 source, 1.5 aspect ratio kept
+  img_w: 480
+  num_lanes: 4                     # DATASET-SPECIFIC: attribute slots left-left, left, right, right-right
+  num_row_anchors: 36
+  row_anchor_range: [0.40, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1                 # DATASET-SPECIFIC: 10 Hz frames, history = t-0.1 s, t-0.2 s
+  num_workers: 0
+  augmentation:
+    # No official UFLD setting for OpenLane: the recipe chosen on ELAS
+    # validation (configs/elas.yaml, v0.4). Revisit on OpenLane validation.
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale: [0.9, 1.1]
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale: [0.85, 1.0]
+    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
+  split:
+    split_seed: 2026
+    val_strategy: sequences        # DATASET-SPECIFIC: whole training segments held out for validation
+    purge_frames: 2
+    val_fraction: 0.25
+    seen_test_fraction: 0.0
+    max_train_frames: 32
+    max_val_frames: 16
+    max_test_frames: 16
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  pretrained: false
+
+train:
+  seeds: [1]
+  epochs: 1
+  batch_size: 4
+  early_stopping_patience: 0
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid: {threshold: [0.5], min_points: [2], poly_degree: [0]}
+  kalman_grid: {q: [1.0], alpha: [0.0]}
+  latency_runs: 2
+  n_visual_examples: 2
+  tensorboard: false

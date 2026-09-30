@@ -9,17 +9,29 @@ device: auto
 requires_confirmation: true
 
 data:
-  dataset: tusimple
-  root: "${TUSIMPLE_ROOT}"
-  img_h: 288
+  dataset: tusimple               # DATASET-SPECIFIC: adapter tac_ufld/data/tusimple.py
+  root: "${TUSIMPLE_ROOT}"        # DATASET-SPECIFIC: folder with train_set/, test_set/, test_label.json
+  img_h: 288                      # DATASET-SPECIFIC: official UFLD TuSimple input 288x800 (source 1280x720)
   img_w: 800
-  num_lanes: 4
-  num_row_anchors: 56
+  num_lanes: 4                    # DATASET-SPECIFIC: up to 4 lanes (official UFLD slot rule)
+  num_row_anchors: 56             # DATASET-SPECIFIC: one anchor per annotated h_sample
   row_anchor_range: [0.22300, 0.98955]   # 64/287 .. 284/287 -> anchors 64, 68, ..., 284
-  griding_num: 100
+  griding_num: 100                # DATASET-SPECIFIC: official UFLD TuSimple grid cells
   num_frames: 3
   temporal_step: 2      # frames 20, 18, 16 of each 20-frame clip (20 fps)
   num_workers: 4
+  augmentation:
+    # Official UFLD training augmentation (cfzd/Ultra-Fast-Lane-Detection,
+    # data/dataloader.py): RandomRotate(6), RandomUDoffsetLABEL(100),
+    # RandomLROffsetLABEL(200), applied to every training image. Without
+    # geometric augmentation UFLD overfitted badly on ELAS (docs/PILOT_V2_FINDINGS.md).
+    geometric:
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.156            # DATASET-SPECIFIC: 200 px of the 1280-px source width
+      translate_y: 0.139            # DATASET-SPECIFIC: 100 px of the 720-px source height
+    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
   split:
     split_seed: 2026
     val_strategy: blocks  # temporal blocks of consecutive clips per drive
@@ -29,6 +41,8 @@ data:
     seen_test_fraction: 0.0
 
 model:
+  # Add v0.4 models as needed (budget!): ufld_baseline_ct, ufld_v06 (aligned),
+  # ufld_v07 (recurrent), lite_baseline, lite_v05, lite_v05_static, lite_v06.
   variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
 
 train:

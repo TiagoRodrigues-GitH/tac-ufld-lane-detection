@@ -10,14 +10,14 @@ device: auto
 requires_confirmation: true   # multi-day run
 
 data:
-  dataset: culane
-  root: "${CULANE_ROOT}"
-  img_h: 288
+  dataset: culane                 # DATASET-SPECIFIC: adapter tac_ufld/data/culane.py
+  root: "${CULANE_ROOT}"          # DATASET-SPECIFIC: folder with driver_*/, laneseg_label_w16/, list/
+  img_h: 288                      # DATASET-SPECIFIC: official UFLD CULane input 288x800 (source 1640x590)
   img_w: 800
-  num_lanes: 4
-  num_row_anchors: 18
+  num_lanes: 4                    # DATASET-SPECIFIC: CULane annotates up to 4 lanes
+  num_row_anchors: 18             # DATASET-SPECIFIC: official UFLD CULane row anchors
   row_anchor_range: [0.4201, 0.9965]   # 121/287 .. 286/287 of the 288-px height
-  griding_num: 200
+  griding_num: 200                # DATASET-SPECIFIC: official UFLD CULane grid cells
   num_frames: 3
   # Frame ids are video-frame numbers; clips store every 30th frame
   # (*_30frame drivers) or every 90th (*_90frame drivers). 90 = the
@@ -25,11 +25,25 @@ data:
   # types; 30 would find no history in the 90-frame drivers.
   temporal_step: 90
   num_workers: 4
+  augmentation:
+    # Official UFLD training augmentation (cfzd/Ultra-Fast-Lane-Detection,
+    # data/dataloader.py): RandomRotate(6), RandomUDoffsetLABEL(100),
+    # RandomLROffsetLABEL(200), applied to every training image. Without
+    # geometric augmentation UFLD overfitted badly on ELAS (docs/PILOT_V2_FINDINGS.md).
+    geometric:
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.122            # DATASET-SPECIFIC: 200 px of the 1640-px source width
+      translate_y: 0.169            # DATASET-SPECIFIC: 100 px of the 590-px source height
+    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
   split:
     purge_frames: 180   # >= temporal_step * (num_frames - 1); official lists are used
     max_train_frames: null
 
 model:
+  # Add v0.4 models as needed (budget!): ufld_baseline_ct, ufld_v06 (aligned),
+  # ufld_v07 (recurrent), lite_baseline, lite_v05, lite_v05_static, lite_v06.
   variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
 
 train:

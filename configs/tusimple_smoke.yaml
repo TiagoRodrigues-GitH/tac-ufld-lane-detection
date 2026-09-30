@@ -1,0 +1,64 @@
+# TuSimple smoke test: a few batches through every stage (split, training,
+# post-processing tuning, evaluation, native TuSimple LaneEval metric,
+# latency). Numbers are NOT results. Runs on the real data (TUSIMPLE_ROOT) or
+# on the synthetic copy built by `python scripts/smoke_datasets.py`.
+# Same geometry as configs/tusimple.yaml.
+
+name: tusimple_smoke
+output_dir: results
+device: auto
+
+data:
+  dataset: tusimple                # DATASET-SPECIFIC: adapter (tac_ufld/data/tusimple.py)
+  root: "${TUSIMPLE_ROOT}"         # DATASET-SPECIFIC: folder holding train_set/, test_set/, test_label.json
+  img_h: 288                       # DATASET-SPECIFIC: official UFLD TuSimple input 288x800
+  img_w: 800
+  num_lanes: 4                     # DATASET-SPECIFIC: up to 4 lanes per frame (official UFLD rule)
+  num_row_anchors: 56              # DATASET-SPECIFIC: anchors 64..284 = h_samples 160..710
+  row_anchor_range: [0.22300, 0.98955]
+  griding_num: 100                 # DATASET-SPECIFIC: official UFLD TuSimple grid
+  num_frames: 3
+  temporal_step: 2                 # DATASET-SPECIFIC: frames 20, 18, 16 of each 20-frame clip (20 fps)
+  num_workers: 0
+  augmentation:
+    # Official UFLD training augmentation (cfzd/Ultra-Fast-Lane-Detection,
+    # data/dataloader.py): RandomRotate(6), RandomUDoffsetLABEL(100),
+    # RandomLROffsetLABEL(200), applied to every training image. Without
+    # geometric augmentation UFLD overfitted badly on ELAS (docs/PILOT_V2_FINDINGS.md).
+    geometric:
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.156            # DATASET-SPECIFIC: 200 px of the 1280-px source width
+      translate_y: 0.139            # DATASET-SPECIFIC: 100 px of the 720-px source height
+    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
+  split:
+    split_seed: 2026
+    val_strategy: blocks           # DATASET-SPECIFIC: TuSimple has no official validation set
+    block_size: 20                 # clips per block (as configs/tusimple.yaml)
+    purge_frames: 4                # clips purged around validation blocks (>= temporal span in frames)
+    val_fraction: 0.1
+    seen_test_fraction: 0.0
+    max_train_frames: 32
+    max_val_frames: 16
+    max_test_frames: 16
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  pretrained: false
+
+train:
+  seeds: [1]
+  epochs: 1
+  batch_size: 4
+  early_stopping_patience: 0
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid: {threshold: [0.5], min_points: [2], poly_degree: [0]}
+  kalman_grid: {q: [1.0], alpha: [0.0]}
+  latency_runs: 2
+  n_visual_examples: 2
+  tensorboard: false
