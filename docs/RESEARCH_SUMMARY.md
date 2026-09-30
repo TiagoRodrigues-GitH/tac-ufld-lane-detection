@@ -2,6 +2,24 @@
 
 Shown in the "Where the research stands" section of the results page, under the key figures and charts. Those numbers are computed from the run folders; the text here is written by hand (30 Sep 2026). Only lines starting with `- ` or `1. ` under a `## ` heading are shown.
 
+## Desafios
+
+- **Base de dados pequena.** O protocolo usa 10 cenas do ELAS, e só 3 ficam reservadas para teste. A UFLD decorava a posição das faixas até entrar o aumento de dados geométrico.
+- **Quadros limpos escondem o efeito temporal.** Com quadros limpos, os modelos temporais UFLD ficam a cerca de ±0,02 de lane F1 da baseline. Duas sementes não bastam para separar isso do ruído.
+- **Os modelos leves treinam devagar e de forma instável.** Treinados do zero, precisam de 16 épocas ou mais. O lite v0.5 sem histórico real (o controle de capacidade) marcou 0,877 em uma semente e 0,627 na outra; por isso ainda não se sabe quanto do ganho do lite v0.5 vem dos quadros anteriores.
+- **Memória em sequências longas.** Os modelos recorrentes derivam quando o estado é mantido ao longo de uma cena inteira (lite v0.6: −0,48 de lane F1). Eles foram treinados só com clipes de 3 quadros.
+- **Mais histórico não é melhor.** Espaçar os quadros do histórico de 2, 5 ou 10 quadros não muda nada; usar 5 quadros em vez de 3 reduz o lane F1.
+- **Uma única base de dados até agora.** CULane, TuSimple e OpenLane ainda não foram baixadas. Os leitores estão prontos e foram testados em cópias sintéticas da estrutura delas.
+- **Ainda sem medição embarcada.** Os números da Jetson são simulações com fatores de lentidão assumidos, não medições.
+
+## Próximos passos
+
+1. Rodar o protocolo completo no ELAS: 6 sementes, até 50 épocas e o mesmo orçamento de busca de hiperparâmetros para todos os modelos (cerca de 4–5 dias na RTX 3050).
+2. Tornar a robustez um resultado principal: primeiro as corrupções sintéticas, depois oclusões naturais, noite e chuva.
+3. Baixar CULane e TuSimple (o guia de download está pronto), pré-treinar nelas, ajustar no ELAS e reportar as métricas oficiais delas.
+4. Resolver a questão dos modelos leves: mais sementes e treino mais longo para o lite v0.5 contra seu controle de capacidade, e treinar os modelos recorrentes com sequências longas.
+5. Última fase, embarcado: exportar o melhor modelo temporal leve para TensorRT (FP16/INT8) e medir latência, memória e consumo de energia em uma Jetson.
+
 ## Challenges
 
 - **Small dataset.** The protocol uses 10 ELAS scenes, and only 3 are held out for testing. UFLD memorised lane positions until geometric augmentation was added.

@@ -954,9 +954,10 @@ def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summar
                     f'<span class="l">{esc(l)}</span></div>' for k, v, l in kpis)
     charts = "".join(f'<figure class="panel"><h3>{esc(t)}</h3>{svg}<figcaption>{cap}</figcaption></figure>'
                      for t, svg, cap in panels)
-    lists = "".join(f'<div class="panel"><h3>{esc(title)}</h3><{"ol" if title.lower().startswith("next") else "ul"}>'
+    ordered = lambda title: "ol" if title.lower().startswith(("next", "próximos")) else "ul"
+    lists = "".join(f'<div class="panel"><h3>{esc(title)}</h3><{ordered(title)}>'
                     + "".join(f"<li>{_md(i)}</li>" for i in items)
-                    + f'</{"ol" if title.lower().startswith("next") else "ul"}></div>' for title, items in plan.items())
+                    + f'</{ordered(title)}></div>' for title, items in plan.items())
     return ('<section id="summary"><h2>Where the research stands</h2><p class="lede">Question: can a lightweight '
             'lane detector that also looks at the previous frames beat the single-frame UFLD baseline, and run on '
             'an in-car embedded system? Everything below comes from pilot runs on ELAS (2–3 seeds, short training, '
@@ -1009,10 +1010,17 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
     s.append(_summary_section(run, df, runs[1:], summary or PROJECT_ROOT / "docs" / "RESEARCH_SUMMARY.md"))
 
     # findings (hand-written analysis)
+    # (a Portuguese version next to the notes, ``<notes>.pt.md``, is shown first)
     if notes_path.exists():
-        items = [l[2:].strip() for l in notes_path.read_text(encoding="utf-8").splitlines() if l.startswith("- ")]
-        s.append('<section id="findings"><h2>What the results show</h2><div class="findings"><ul>'
-                 + "".join(f"<li>{_md(i)}</li>" for i in items) + "</ul></div></section>")
+        versions = [("pt", "O que os resultados mostram", notes_path.with_name(notes_path.stem + ".pt.md")),
+                    ("en", "What the results show", notes_path)]
+        blocks = []
+        for lang, heading, path in versions:
+            if path.exists():
+                items = [l[2:].strip() for l in path.read_text(encoding="utf-8").splitlines() if l.startswith("- ")]
+                blocks.append(f'<h2 lang="{lang}">{heading}</h2><div class="findings" lang="{lang}"><ul>'
+                              + "".join(f"<li>{_md(i)}</li>" for i in items) + "</ul></div>")
+        s.append('<section id="findings">' + "".join(blocks) + "</section>")
 
     s.append(models_section(efficiency, present))
 
