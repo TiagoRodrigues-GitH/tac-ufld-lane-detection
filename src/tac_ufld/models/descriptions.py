@@ -120,6 +120,7 @@ DIFFERENCES = [
     "do they cost (UFLD about 7 GMACs per frame, lite about 2).",
     "With feature caching each frame is encoded once, so a temporal model costs its baseline plus the fusion "
     "step, not three backbones.",
-    "The +CT controls and the Kalman tracker are not candidates. They separate a real temporal gain from extra "
-    "training and from what simple output filtering already gives.",
+    "The controls are not candidates. +CT separates a temporal gain from extra training, lite v0.5 static "
+    "separates it from the extra fusion layers, and the Kalman tracker shows what simple output filtering already "
+    "gives.",
 ]

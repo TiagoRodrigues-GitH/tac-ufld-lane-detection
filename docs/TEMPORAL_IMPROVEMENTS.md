@@ -73,12 +73,21 @@ the warm start the model is exactly its baseline (tested). Two ways to run it:
 Carry mode runs on the PyTorch backend only; exporting the single-step graph (state in, state out) to ONNX /
 TensorRT belongs to the embedded phase.
 
-## 6. Equal-training controls
+## 6. Equal-training and capacity controls
 
 `ufld_baseline_ct` and `lite_baseline_ct` are the baselines trained a second time from their own best
 checkpoint with the schedule the temporal variants get after their warm start. The report pairs every temporal
 model with its baseline **and** with this control (`budget_reference`), and the control with the baseline
 (does extra training alone help?).
+
+The second pilot showed that this is not enough for the lite family: most of lite v0.5's lead over its
+baseline survived when its history frames were replaced by the current frame at test time, which points at the
+extra fusion layers rather than at time. `lite_v05_static` is therefore lite v0.5 unchanged (layers, warm
+start, loss, budget) but trained and evaluated on clips made of the **current frame repeated**. The static clip
+is built after augmentation, so a degraded current frame is never paired with a clean copy of itself. The
+report pairs `lite_v05` with it (`static_reference`): a gain over this control can only come from the earlier
+frames. Streaming runs it with the current frame in every history position (`static_history` in the model
+card).
 
 ## 7. Evaluate where time should help
 

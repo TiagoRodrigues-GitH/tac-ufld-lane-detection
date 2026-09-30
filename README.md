@@ -96,6 +96,7 @@ Configs marked `requires_confirmation` (the full ELAS, CULane, TuSimple and Open
 | `ufld_baseline_ct` (v0.4) | control: the baseline trained again from its best checkpoint with the temporal variants' schedule | `ufld_baseline` | `ufld_baseline` |
 | `lite_baseline` | 4-block CNN + per-anchor MLP head | scratch | — |
 | `lite_v05` | same backbone + learned feature warping + residual gated fusion | `lite_baseline` | `lite_baseline`, `lite_baseline_ct` |
+| `lite_v05_static` (v0.4) | control: lite v0.5 fed the current frame in every position (same layers, no time) | `lite_baseline` | `lite_baseline`; `lite_v05` is paired with it |
 | `lite_v06` (v0.4) | same backbone + ConvGRU fusion | `lite_baseline` | `lite_baseline`, `lite_baseline_ct` |
 | `lite_baseline_ct` (v0.4) | control for the lite family | `lite_baseline` | `lite_baseline` |
 
