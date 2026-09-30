@@ -87,3 +87,19 @@ Audit of the starting point: [AUDIT_V03.md](AUDIT_V03.md). Nothing in the model 
 | Benchmark | measured latency + budget simulation | `evaluation/hardware.py` | `test_tools.py` |
 | UI, site, packaging, doctor, Docker | new | `ui/`, `site.py`, `package.py`, `doctor.py`, `Dockerfile`, `docker-compose.yml` | `test_ui.py`, `test_site.py`, `test_tools.py`, `test_docker.py` |
 | Tooling | `sanity`, `ablate`, `export`, `stream`, `benchmark`, `ui`, `site`, `package`, `doctor`, `carla-demo` commands | `commands.py` | `test_tools.py` |
+
+## v0.4 changes (2026-09-30)
+
+Everything is opt-in; v0.3 configurations train and evaluate exactly as before (tested). Details:
+`docs/TEMPORAL_IMPROVEMENTS.md`.
+
+| Area | Change | Where | Test |
+|---|---|---|---|
+| Overfitting | `train.lr_backbone_mult` (separate optimizer group only when not 1; HPO parameter), `train.freeze_backbone_stages` (frozen BatchNorm statistics), `model.init_checkpoint` / `init_scope` (official UFLD or own checkpoints) | `training/trainer.py`, `models/registry.py`, `experiment.py`, `config.py` | `test_temporal_v04.py` |
+| Augmentation | current-frame degradation (occlude / blur / darken / noise on the last frame only); draws no random numbers when off | `data/transforms.py`, `config.py` | `test_temporal_v04.py` |
+| Models | `ufld_v06` (aligned fusion), `ufld_v07` / `lite_v06` (ConvGRU, `recurrent_step`), controls `ufld_baseline_ct` / `lite_baseline_ct`; `VariantSpec.fusion`, `budget_reference`; `LiteWarpTemporal` renamed `LiteTemporal` (alias kept, state-dict keys unchanged) | `models/fusion.py`, `models/ufld.py`, `models/lite.py`, `models/registry.py` | `test_temporal_v04.py`, `test_streaming.py` (all temporal variants) |
+| Evaluation | Kalman reference (`input = kalman`), carried-state evaluation (`input = carry`), per-condition table, equal-training pairs | `evaluation/tracking.py`, `evaluation/recurrent_eval.py`, `experiment.py` | `test_temporal_v04.py`, `test_integration.py` |
+| Streaming | `mode="carry"` for recurrent models, optional per-stream Kalman tracker (`stream --mode carry --kalman`) | `inference/streaming.py`, `inference/backends.py`, `commands.py` | `test_temporal_v04.py` |
+| Ablations | `common`, `allow`, `grid`, `reuse_single_frame`; reference arm runs first; new arms in `augmentation.yaml`; `history.yaml` | `ablation.py`, `configs/ablations/` | `test_temporal_v04.py`, `test_tools.py` |
+| Logging (bug) | a process running several experiments kept writing into every earlier run's `run.log` | `utils.py` | `test_temporal_v04.py` |
+| Results page | light blue / white theme, model explanations, ablation sections, roadmap; `site --notes --roadmap` | `site.py`, `models/descriptions.py`, `docs/ROADMAP.md` | `test_site.py` |

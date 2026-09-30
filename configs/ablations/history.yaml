@@ -1,0 +1,31 @@
+# History-length ablation: how far back and how many frames should a
+# temporal model look?
+#   python -m tac_ufld ablate --spec configs/ablations/history.yaml            # plan (all arms)
+#   python -m tac_ufld ablate --spec configs/ablations/history.yaml --confirm --only s2_t3 s5_t3 s10_t3
+#
+# Arms = every combination of the grid below: s<step>_t<frames> uses frames
+# t - k*step, k = frames-1 .. 0 (e.g. s10_t5 = t-40, t-30, t-20, t-10, t).
+# Add values to the grid for more options; the purge gap under `common` must
+# stay >= the largest span step*(frames-1) of any arm, so that every arm uses
+# the SAME leakage-safe split (block_size 180 keeps ~80 % of the training
+# frames of the 60/10 pilot split while allowing a 60-frame purge).
+#
+# The single-frame baseline does not depend on the history setting, so it is
+# trained once (reference arm) and reused by every arm: all temporal arms
+# start from identical baseline weights (reuse_single_frame).
+
+name: ablation_history
+description: "History length (frames) and spacing (step) for the temporal models, lite family (ELAS)."
+base_config: configs/elas_pilot.yaml
+variants: [lite_baseline, lite_v05]
+seeds: [1, 2]
+hpo: false
+reference_arm: s2_t3            # the setting of every run so far
+allow: [data.temporal_step, data.num_frames]
+reuse_single_frame: true
+common:
+  data.split.block_size: 180
+  data.split.purge_frames: 60   # >= 15 * (5 - 1)
+grid:
+  data.temporal_step: [1, 2, 5, 10, 15]
+  data.num_frames: [2, 3, 4, 5]

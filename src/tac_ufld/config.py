@@ -98,8 +98,27 @@ class AugmentationConfig:
     shadow_prob: float = 0.0
     shadow_strength: list[float] = field(default_factory=lambda: [0.3, 0.7])
     geometric: GeometricAugConfig = field(default_factory=GeometricAugConfig)
+    # Current-frame degradation: with this probability ONLY the current frame
+    # (the one whose lanes are the target) is occluded, blurred, darkened or
+    # made noisy, while the history frames stay clean. A temporal model can
+    # then only recover the lanes by using its history, so it learns to use
+    # it. Applied to every model (single-frame baselines see the same
+    # corrupted current frame), so the training recipe stays identical across
+    # the pair. Sampled independently of ``prob``; 0 = off (no random draws).
+    current_frame_prob: float = 0.0
+    current_frame_ops: list[str] = field(default_factory=lambda: ["occlude", "blur", "darken", "noise"])
+    current_occlusion_boxes: list[int] = field(default_factory=lambda: [1, 3])
+    current_occlusion_scale: list[float] = field(default_factory=lambda: [0.03, 0.12])  # area fraction per box
+    current_occlusion_band: list[float] = field(default_factory=lambda: [0.55, 1.0])    # box centres, fraction of height
+    current_blur_sigma: list[float] = field(default_factory=lambda: [2.0, 5.0])
+    current_darken: list[float] = field(default_factory=lambda: [0.15, 0.5])             # brightness factor
+    current_noise_std: list[float] = field(default_factory=lambda: [0.08, 0.2])
 
 
+CURRENT_FRAME_OPS = ("occlude", "blur", "darken", "noise")
+
+
+HPO_PARAMS = ("lr", "lr_fusion", "weight_decay", "lambda_temporal", "lambda_coord", "lr_backbone_mult")
 PREPROCESS_MODES = ("rgb", "gray", "gray3", "edge", "canny", "hough", "rgb_edge")
 PRE_OPS = ("blur", "clahe", "equalize")
 
@@ -194,9 +213,27 @@ class ModelConfig:
     # Optional dropout before the last Linear of the UFLD head (0 = official
     # UFLD, no dropout). Parameter-free, so state dicts are unchanged.
     head_dropout: float = 0.0
+    # Hidden width of the UFLD fully connected head (official: 2048, about
+    # 10 M of the 21.8 M parameters at 384x512). Smaller = fewer parameters to
+    # memorise a small training set (an overfitting remedy, not official UFLD).
+    ufld_head_hidden: int = 2048
     # Dropout of the lite models (values of the original ELAS script).
     lite_dropout: float = 0.05
     lite_head_dropout: float = 0.15
+    # Initialise the models that are not warm-started (the baselines) from
+    # another checkpoint instead of ImageNet only: an official UFLD
+    # checkpoint (e.g. culane_18.pth / tusimple_18.pth) or one of our own
+    # checkpoints trained on CULane / TuSimple / OpenLane. Every tensor whose
+    # name and shape match is copied (the head usually differs: other lane
+    # count, anchors and grid); ``init_scope: backbone`` copies the backbone
+    # only. Temporal variants inherit it through their warm start.
+    init_checkpoint: str | None = None
+    init_scope: str = "backbone"       # backbone | all_matching
+    # Aligned fusion (ufld_v06): maximum flow displacement in feature cells
+    # (UFLD features have stride 32, so 4 cells = 128 px at 512 px width).
+    aligned_max_disp: float = 4.0
+    # Recurrent fusion (ufld_v07, lite_v06): ConvGRU hidden channels.
+    recurrent_hidden: int = 64
 
 
 @dataclass
@@ -231,6 +268,14 @@ class TrainConfig:
     # Write <variant>.last.pt every epoch so an interrupted run continues
     # mid-training with --resume (optimizer, scheduler, RNG and history).
     save_last: bool = True
+    # Backbone learning rate = lr * lr_backbone_mult (head and fusion keep
+    # theirs). < 1 keeps the pretrained features closer to ImageNet, a
+    # standard remedy for overfitting on small datasets. 1 = original.
+    lr_backbone_mult: float = 1.0
+    # Freeze the first N backbone stages (weights fixed, BatchNorm statistics
+    # frozen). ResNet: 1 = stem (conv1/bn1), 2 = + layer1, 3 = + layer2,
+    # 4 = + layer3, 5 = whole backbone. Lite: N of the 4 conv blocks.
+    freeze_backbone_stages: int = 0
 
 
 @dataclass
@@ -285,6 +330,18 @@ class EvalConfig:
     n_visual_examples: int = 12
     visualize_seeds: int = 1
     tensorboard: bool = True
+    # Output-level Kalman tracker applied to every model's predictions (a
+    # causal filter over the frames of each sequence), tuned on validation.
+    # It is the cheap temporal reference a learned temporal model must beat.
+    kalman: bool = True
+    kalman_grid: dict[str, list[float]] = field(
+        default_factory=lambda: {"q": [0.1, 1.0, 10.0], "alpha": [0.0, 0.5, 0.8]}
+    )
+    # Recurrent models are also evaluated frame by frame with the hidden
+    # state carried across the whole sequence (longer memory than the
+    # training window); "window" mode (exactly the training computation) is
+    # the main result.
+    carry_state_eval: bool = True
 
 
 @dataclass
@@ -380,8 +437,23 @@ class ExperimentConfig:
         if d.num_frames < 1:
             raise ConfigError("data.num_frames must be >= 1")
         for name in self.hpo.search_space:
-            if name not in ("lr", "lr_fusion", "weight_decay", "lambda_temporal", "lambda_coord"):
-                raise ConfigError(f"unsupported HPO parameter '{name}'")
+            if name not in HPO_PARAMS:
+                raise ConfigError(f"unsupported HPO parameter '{name}' (supported: {HPO_PARAMS})")
+        m = self.model
+        if m.init_scope not in ("backbone", "all_matching"):
+            raise ConfigError("model.init_scope must be 'backbone' or 'all_matching'")
+        if m.ufld_head_hidden < 8:
+            raise ConfigError("model.ufld_head_hidden must be >= 8")
+        if m.aligned_max_disp <= 0 or m.recurrent_hidden < 4:
+            raise ConfigError("model.aligned_max_disp must be > 0 and model.recurrent_hidden >= 4")
+        if t.lr_backbone_mult <= 0:
+            raise ConfigError("train.lr_backbone_mult must be > 0")
+        if not 0 <= t.freeze_backbone_stages <= 5:
+            raise ConfigError("train.freeze_backbone_stages must be in [0, 5]")
+        unknown_kf = set(e.kalman_grid) - {"q", "r", "alpha", "gate_px"}
+        if unknown_kf or any(not v for v in e.kalman_grid.values()):
+            raise ConfigError(f"evaluation.kalman_grid: unknown key(s) {sorted(unknown_kf)} or empty value list "
+                              "(supported: q, r, alpha, gate_px)")
         from tac_ufld.data import KNOWN_DATASETS  # local import avoids a cycle
 
         if d.dataset.lower() not in KNOWN_DATASETS:
@@ -390,7 +462,6 @@ class ExperimentConfig:
             raise ConfigError("data.split.val_strategy must be 'blocks' or 'sequences'")
         self._validate_preprocessing()
         self._validate_augmentation()
-        m = self.model
         for name in ("head_dropout", "lite_dropout", "lite_head_dropout"):
             if not 0 <= getattr(m, name) < 1:
                 raise ConfigError(f"model.{name} must be in [0, 1)")
@@ -454,6 +525,19 @@ class ExperimentConfig:
             if not 0 < lo <= hi or (name == "crop_scale" and hi > 1):
                 raise ConfigError(f"data.augmentation.geometric.{name} must be [low, high], 0 < low <= high"
                                   + (" <= 1" if name == "crop_scale" else ""))
+        if not 0 <= a.current_frame_prob <= 1:
+            raise ConfigError("data.augmentation.current_frame_prob must be in [0, 1]")
+        bad_ops = [op for op in a.current_frame_ops if op not in CURRENT_FRAME_OPS]
+        if bad_ops or (a.current_frame_prob > 0 and not a.current_frame_ops):
+            raise ConfigError(f"data.augmentation.current_frame_ops must be a non-empty subset of {CURRENT_FRAME_OPS}")
+        for name in ("current_occlusion_boxes", "current_occlusion_scale", "current_occlusion_band",
+                     "current_blur_sigma", "current_darken", "current_noise_std"):
+            lo, hi = getattr(a, name)
+            if lo > hi or lo < 0:
+                raise ConfigError(f"data.augmentation.{name} must be [low, high] with 0 <= low <= high")
+        if a.current_occlusion_band[1] > 1 or a.current_occlusion_scale[1] >= 1 or a.current_darken[1] > 1:
+            raise ConfigError("data.augmentation.current_occlusion_band/current_darken must be <= 1 and "
+                              "current_occlusion_scale < 1")
         if not 0 < g.min_row_valid <= 1:
             raise ConfigError("data.augmentation.geometric.min_row_valid must be in (0, 1]")
         if g.border not in ("constant", "replicate", "reflect"):

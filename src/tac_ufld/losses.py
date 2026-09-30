@@ -118,6 +118,7 @@ class Hyperparams:
     weight_decay: float
     lambda_temporal: float
     lambda_coord: float
+    lr_backbone_mult: float = 1.0   # backbone lr = lr * lr_backbone_mult
 
     def as_dict(self) -> dict[str, float]:
         return dict(self.__dict__)

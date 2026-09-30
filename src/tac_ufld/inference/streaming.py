@@ -26,6 +26,20 @@ reset when ``reset_stream`` is called, when ``sequence_id`` changes, when the
 source frame size changes, or when frame indices go backwards. Frame indices
 come from ``frame_index``, from ``timestamp`` x ``nominal_fps``, or from a
 per-stream counter (every call = next frame; drops cannot be detected then).
+
+Recurrent models (ConvGRU fusion)
+---------------------------------
+``mode="cached"`` runs them exactly as trained (the GRU restarts from zero
+over the window of cached features). ``mode="carry"`` keeps ONE hidden
+state per chain instead: the state of frame ``t`` is updated from the state
+of frame ``t - temporal_step`` (``temporal_step`` interleaved chains, so
+consecutive updates are as far apart as in training). Memory then reaches
+back to the start of the stream; a missing predecessor restarts the chain.
+
+Output tracker
+--------------
+``tracker=KalmanParams(...)`` filters the decoded lane points of each
+stream with the causal Kalman tracker of ``tac_ufld.evaluation.tracking``.
 """
 
 from __future__ import annotations
@@ -44,7 +58,7 @@ from tac_ufld.inference.backends import Backend, TorchBackend
 from tac_ufld.inference.loading import FramePreprocessor, LoadedModel
 from tac_ufld.postprocess import PostprocessParams, lanes_from_prediction
 
-MODES = ("cached", "recompute")
+MODES = ("cached", "recompute", "carry")
 
 
 @dataclass
@@ -71,13 +85,14 @@ class _StreamState:
     sequence_id: str | None = None
     t0: float | None = None
     frames_seen: int = 0
+    tracker: object | None = None
 
 
 class StreamingLaneDetector:
     def __init__(self, loaded: LoadedModel, backend: Backend | None = None, mode: str = "cached",
                  history_length: int | None = None, nominal_fps: float | None = None,
                  postprocess: PostprocessParams | None = None,
-                 valid_y_range: tuple[float, float] | None = None) -> None:
+                 valid_y_range: tuple[float, float] | None = None, tracker=None) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         model = loaded.model
@@ -85,7 +100,10 @@ class StreamingLaneDetector:
             raise RuntimeError("feature caching needs eval mode (BatchNorm/dropout would make features stale)")
         self.loaded = loaded
         self.backend = backend or TorchBackend(model, loaded.device)
+        if mode == "carry" and not (getattr(model, "recurrent", False) and hasattr(self.backend, "step")):
+            raise ValueError("mode 'carry' needs a recurrent model (ufld_v07, lite_v06) on the PyTorch backend")
         self.mode = mode
+        self.tracker_params = tracker
         self.temporal = loaded.temporal
         self.num_frames = loaded.num_frames
         self.step = int(loaded.card["temporal_step"])
@@ -173,6 +191,14 @@ class StreamingLaneDetector:
         if not self.temporal:
             enc = self.backend.encode(x)
             logits = self.backend.head([], enc["current"])
+        elif self.mode == "carry":
+            enc = self.backend.encode(x)
+            previous = index - self.step
+            prev_state = state.cache.get(previous)
+            history_idx, fallbacks = ([previous], 0) if prev_state is not None else ([], 1)
+            logits, state.cache[index] = self.backend.step(enc["current"], prev_state)
+            for old in [i for i in state.cache if i <= previous]:
+                del state.cache[old]
         else:
             history_idx, fallbacks = self._context(index, set(state.cache))
             if self.mode == "cached":
@@ -197,6 +223,12 @@ class StreamingLaneDetector:
         exist = exist_t[0].cpu().numpy()
         grid = logits_t.shape[1] - 1
         x_model = (bins_t[0] * (self.loaded.cfg.data.img_w - 1) / (grid - 1)).cpu().numpy()
+        if self.tracker_params is not None:
+            from tac_ufld.evaluation.tracking import LaneKalmanTracker
+
+            if state.tracker is None:
+                state.tracker = LaneKalmanTracker(self.tracker_params)
+            exist, x_model = state.tracker.update(exist, x_model, index)
         lanes = lanes_from_prediction(exist, x_model, self.anchors, self.postprocess, self.loaded.model_size,
                                       size, self.valid_y_range)
         confidence = []

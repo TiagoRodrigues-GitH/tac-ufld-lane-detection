@@ -101,7 +101,13 @@ def protocol_section(cfg, split_info: dict, best_params: dict, variants: list[st
              f"per variant, same budget for baselines); tuned: "
              f"{ {v: best_params.get(v) for v in variants if best_params.get(v)} or 'none'}.",
              f"* Photometric augmentation: {'on' if a.enabled else 'off'} (p={a.prob}; extra: {extra_photo or 'none'}); "
-             f"geometric: {geo}.",
+             f"geometric: {geo}; current-frame degradation (history kept clean): "
+             f"{f'p={a.current_frame_prob}, ops {a.current_frame_ops}' if a.enabled and a.current_frame_prob else 'off'}.",
+             f"* Backbone: lr multiplier {t.lr_backbone_mult}, frozen stages {t.freeze_backbone_stages}, "
+             f"initialisation {'ImageNet' if cfg.model.pretrained else 'random'}"
+             f"{f' + {cfg.model.init_checkpoint} ({cfg.model.init_scope})' if cfg.model.init_checkpoint else ''}; "
+             f"temporal context {cfg.data.num_frames} frames, step {cfg.data.temporal_step}.",
+             f"* Output-level Kalman reference: {'on, grid ' + str(e.kalman_grid) + ' tuned on validation' if e.kalman else 'off'}.",
              f"* Input representation: `{p.mode}` (pre-ops {p.pre_ops or 'none'}), {cfg.in_channels} channel(s).",
              f"* Settings that differ from the package defaults: {len(changes)} (see `config_changes.json`)."]
     return lines

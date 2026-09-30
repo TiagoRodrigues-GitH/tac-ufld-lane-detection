@@ -29,7 +29,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from tac_ufld import __version__
-from tac_ufld.config import ExperimentConfig, save_config
+from tac_ufld.config import PROJECT_ROOT, ExperimentConfig, expand_env, save_config
 from tac_ufld.data import build_adapter
 from tac_ufld.data.dataset import TemporalLaneDataset
 from tac_ufld.data.splits import DataSplits, build_splits, cap_records
@@ -38,10 +38,14 @@ from tac_ufld.data.types import FrameRecord
 from tac_ufld.evaluation.efficiency import measure_efficiency
 from tac_ufld.evaluation.evaluator import Evaluator, iou_tag
 from tac_ufld.evaluation.predictor import predict
+from tac_ufld.evaluation.recurrent_eval import carry_predictions
+from tac_ufld.evaluation.tracking import track_predictions, tune_kalman
 from tac_ufld.evaluation.stats import aggregate, paired_comparisons
 from tac_ufld.inference.card import model_card
 from tac_ufld.losses import Hyperparams
-from tac_ufld.models.registry import VARIANTS, build_model, resolve_spec, training_order, warm_start
+from tac_ufld.models.registry import (
+    SHORT_LABELS, VARIANTS, build_model, init_from_checkpoint, resolve_spec, training_order, warm_start,
+)
 from tac_ufld.postprocess import PostprocessParams
 from tac_ufld.reporting import (
     config_diff, export_lines_txt, markdown_table, protocol_section, summary_table, write_excel,
@@ -159,7 +163,8 @@ class ExperimentRunner:
     def base_hyperparams(self) -> Hyperparams:
         t = self.cfg.train
         return Hyperparams(lr=t.lr, lr_fusion=t.lr_fusion, weight_decay=t.weight_decay,
-                           lambda_temporal=t.lambda_temporal, lambda_coord=t.lambda_coord)
+                           lambda_temporal=t.lambda_temporal, lambda_coord=t.lambda_coord,
+                           lr_backbone_mult=t.lr_backbone_mult)
 
     def hyperparams(self, variant: str) -> Hyperparams:
         return replace(self.base_hyperparams(), **self.best_params.get(variant, {}))
@@ -175,6 +180,12 @@ class ExperimentRunner:
             payload = torch.load(warm_from, map_location="cpu", weights_only=False)
             loaded = warm_start(model, payload["state_dict"])
             LOGGER.info("[%s] warm start from %s (%s)", variant, Path(warm_from).name, ", ".join(loaded))
+        elif self.cfg.model.init_checkpoint:
+            path = Path(expand_env(self.cfg.model.init_checkpoint, "model.init_checkpoint"))
+            path = path if path.is_absolute() else PROJECT_ROOT / path
+            info = init_from_checkpoint(model, str(path), self.cfg.model.init_scope)
+            LOGGER.info("[%s] initialised from %s: %d tensors loaded, %d skipped (shape mismatch)",
+                        variant, path.name, len(info["loaded"]), len(info["skipped"]))
         return model.to(self.device)
 
     def _frames(self, variant: str) -> int:
@@ -315,8 +326,14 @@ class ExperimentRunner:
             val_preds = predict(model, self.loader(val_ds, False), self.device, cfg.data.img_w, cfg.train.amp)
             tuned, sweep = self.evaluator.sweep(val_preds, val_ds.records, cfg.evaluation.postprocess_grid, common)
             sweep.to_csv(seed_dir / "postprocess" / f"{variant}_val_sweep.csv", index=False)
+            kalman = None
+            if cfg.evaluation.kalman:  # output-level tracker, tuned on validation like the post-processing
+                kalman, kf_sweep = tune_kalman(self.evaluator, val_preds, val_ds.records, tuned,
+                                               cfg.evaluation.kalman_grid, cfg.evaluation.selection_metric)
+                kf_sweep.to_csv(seed_dir / "postprocess" / f"{variant}_kalman_val_sweep.csv", index=False)
             write_json(seed_dir / "postprocess" / f"{variant}_tuned.json",
-                       {"params": tuned.as_dict(), "selected_on": "val", "metric": cfg.evaluation.selection_metric})
+                       {"params": tuned.as_dict(), "selected_on": "val", "metric": cfg.evaluation.selection_metric,
+                        "kalman": kalman.as_dict() if kalman else None})
             protocols = {"tuned": tuned, "common": common}
             for split in EVAL_SPLITS:
                 if not self.splits.as_dict()[split]:
@@ -328,14 +345,21 @@ class ExperimentRunner:
                     variants_of_input.append(("static_history", predict(
                         model, self.loader(ds, False), self.device, cfg.data.img_w, cfg.train.amp,
                         static_history=True)))
+                if kalman is not None:
+                    variants_of_input.append(("kalman", track_predictions(preds, ds.records, kalman)))
+                if split == "test" and cfg.evaluation.carry_state_eval and getattr(model, "recurrent", False):
+                    variants_of_input.append(("carry", carry_predictions(
+                        model, ds, self.adapter, self.device, cfg.data.img_w, cfg.train.amp, cfg.data.temporal_step)))
                 for input_mode, p in variants_of_input:
                     for protocol, params in protocols.items():
                         if input_mode != "full" and protocol != "tuned":
                             continue
                         res = self.evaluator.evaluate(p, ds.records, params)
+                        kf_cols = {f"kf_{k}": v for k, v in kalman.as_dict().items()} \
+                            if input_mode == "kalman" else {}
                         rows.append({"seed": seed, "variant": variant, "split": split, "protocol": protocol,
                                      "input": input_mode, **res.metrics,
-                                     **{f"pp_{k}": v for k, v in params.as_dict().items()}})
+                                     **{f"pp_{k}": v for k, v in params.as_dict().items()}, **kf_cols})
                         if protocol == "tuned" and input_mode == "full":
                             res.per_frame.to_csv(seed_dir / "per_frame" / f"{variant}_{split}.csv", index=False)
                             if split == "test":
@@ -379,6 +403,12 @@ class ExperimentRunner:
                          f"lane_fp_{tag}", f"lane_fn_{tag}"]
         pairs = [(v, resolve_spec(v, cfg).reference) for v in self.variants
                  if resolve_spec(v, cfg).reference in self.variants]
+        # equal-training controls: temporal vs the baseline given the same extra
+        # training, and that control vs the plain baseline (does more training help?)
+        pairs += [(v, resolve_spec(v, cfg).budget_reference) for v in self.variants
+                  if resolve_spec(v, cfg).budget_reference in self.variants]
+        pairs += [(v, resolve_spec(v, cfg).warm_start) for v in self.variants
+                  if not resolve_spec(v, cfg).temporal and resolve_spec(v, cfg).warm_start in self.variants]
         sheets, md = {}, [f"# Experiment report: {cfg.name}\n",
                           f"Config hash `{cfg.config_hash()}`, package {__version__}, seeds {self.seeds}, "
                           f"device {self.device}.\n",
@@ -420,8 +450,10 @@ class ExperimentRunner:
                     sheets["paired_tests"] = paired
                     md += ["\n## Paired comparisons vs same-family single-frame reference (test, tuned)\n",
                            "Exact two-sided Wilcoxon over seeds, Holm-adjusted. `underpowered` = "
-                           "the seed count cannot reach p < 0.05.\n",
+                           "the seed count cannot reach p < 0.05. Rows paired with `*_baseline_ct` compare with "
+                           "the baseline that received the same extra training (equal-training control).\n",
                            markdown_table(paired.round(4)) if not paired.empty else "_(no pairs)_\n"]
+        md += self._temporal_sections(results, rep, sheets)
         ablation = self._ablation_table(results)
         if not ablation.empty:
             ablation.to_csv(rep / "temporal_ablation.csv", index=False)
@@ -437,6 +469,69 @@ class ExperimentRunner:
         path.write_text("\n".join(md), encoding="utf-8")
         LOGGER.info("report written to %s", rep)
         return path
+
+    def _temporal_sections(self, results: pd.DataFrame, rep: Path, sheets: dict) -> list[str]:
+        """Where temporal information should help: per-condition F1 and
+        jitter, the output-level Kalman reference, and carried-state results."""
+        tag = self.evaluator.primary_tag
+        metric = f"lane_f1_{tag}"
+        sub = results[(results["split"] == "test") & (results["protocol"] == "tuned")]
+        full = sub[sub["input"] == "full"]
+        md: list[str] = []
+        cond = sorted(c for c in full.columns if c.startswith(f"condition_f1_{tag}_") and full[c].notna().any())
+        if cond:
+            agg = aggregate(full, cond + ["jitter_px"])
+            agg.to_csv(rep / "test_conditions.csv", index=False)
+            sheets["test_conditions"] = agg
+            names = [c.removeprefix(f"condition_f1_{tag}_") for c in cond]
+            frames = {n: int(full[f"condition_frames_{n}"].max()) for n in names if f"condition_frames_{n}" in full}
+            md += ["\n## Where temporal information should help (held-out test, tuned)\n",
+                   f"Lane F1 per scene condition (frames per condition: {frames}); a condition covers whole "
+                   "scenes, so with three held-out scenes these are scene-level, not frame-level, subsets. "
+                   "`jitter_px` = mean frame-to-frame change of the predicted lane x (original pixels): lower is "
+                   "steadier (it also includes real lane motion).\n",
+                   markdown_table(summary_table(agg, cond + ["jitter_px"], self.labels))]
+        kf = sub[sub["input"] == "kalman"]
+        if not kf.empty:
+            combined = pd.concat([full, kf.assign(variant=kf["variant"] + "+kf")], ignore_index=True)
+            labels = {**self.labels, **{f"{v}+kf": f"{self.labels.get(v, v)} + Kalman" for v in kf["variant"].unique()}}
+            order = [n for v in self.variants for n in (v, f"{v}+kf") if n in set(combined["variant"])]
+            agg = aggregate(combined, [metric, "jitter_px"])
+            agg["variant"] = pd.Categorical(agg["variant"], order, ordered=True)
+            agg = agg.sort_values(["variant", "metric"])
+            agg["variant"] = agg["variant"].astype(str)
+            agg.to_csv(rep / "kalman_reference.csv", index=False)
+            sheets["kalman_reference"] = agg
+            kf_pairs = []
+            present = set(combined["variant"])
+            for v in self.variants:
+                spec = resolve_spec(v, self.cfg)
+                if spec.temporal and f"{spec.reference}+kf" in present:
+                    kf_pairs.append((v, f"{spec.reference}+kf"))
+                elif not spec.temporal and f"{v}+kf" in present:
+                    kf_pairs.append((f"{v}+kf", v))
+            paired = paired_comparisons(combined, kf_pairs, {metric: True, "jitter_px": False})
+            paired.to_csv(rep / "paired_tests_kalman.csv", index=False)
+            sheets["paired_kalman"] = paired
+            md += ["\n## Output-level Kalman tracker (the cheap temporal reference)\n",
+                   "Every model's predictions filtered by a causal constant-velocity Kalman filter per lane point, "
+                   "parameters tuned on validation. A learned temporal model earns its cost only if it beats its "
+                   "single-frame baseline + this tracker (pairs `temporal vs baseline+kf` below).\n",
+                   markdown_table(summary_table(agg, [metric, "jitter_px"], labels)),
+                   markdown_table(paired.round(4)) if not paired.empty else "_(no pairs)_\n"]
+        carry = sub[sub["input"] == "carry"]
+        if not carry.empty:
+            win = full.set_index(["variant", "seed"])[metric]
+            car = carry.set_index(["variant", "seed"])[metric]
+            delta = (car - win.reindex(car.index)).groupby(level=0).agg(["mean", "std", "count"]).reset_index()
+            delta.columns = ["variant", f"mean_gain_carry_vs_window_{metric}", "std", "n_seeds"]
+            delta.to_csv(rep / "carry_state.csv", index=False)
+            sheets["carry_state"] = delta
+            md += ["\n## Recurrent models with a carried state (held-out test)\n",
+                   "`window` (main result) runs the ConvGRU from zero over the training clip; `carry` keeps one "
+                   "state per stream across the whole scene (longer memory, one state tensor). Difference in "
+                   "lane F1, carry minus window:\n", markdown_table(delta)]
+        return md
 
     def _ablation_table(self, results: pd.DataFrame) -> pd.DataFrame:
         metric = f"lane_f1_{self.evaluator.primary_tag}"

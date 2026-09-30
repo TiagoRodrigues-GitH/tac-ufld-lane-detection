@@ -91,8 +91,19 @@ Configs marked `requires_confirmation` (the full ELAS, CULane, TuSimple and Open
 | `ufld_v02` | shared ResNet-18 on 3 frames + learnable per-frame weights; + weighted existence BCE + temporal consistency | `ufld_baseline` | `ufld_baseline` |
 | `ufld_v03` | per-pixel gated fusion over frames; + gate prior | `ufld_baseline` | `ufld_baseline` |
 | `ufld_v04` | v0.2 architecture + soft-argmax coordinate loss | `ufld_baseline` (`v04_warm_start: v02` for the original protocol) | `ufld_baseline` |
+| `ufld_v06` (v0.4) | lite v0.5's learned warp + residual gate on UFLD layer-4 features (aligned fusion) | `ufld_baseline` | `ufld_baseline`, `ufld_baseline_ct` |
+| `ufld_v07` (v0.4) | ConvGRU over the frames, zero-initialised residual read-out; can carry one state per stream | `ufld_baseline` | `ufld_baseline`, `ufld_baseline_ct` |
+| `ufld_baseline_ct` (v0.4) | control: the baseline trained again from its best checkpoint with the temporal variants' schedule | `ufld_baseline` | `ufld_baseline` |
 | `lite_baseline` | 4-block CNN + per-anchor MLP head | scratch | — |
-| `lite_v05` | same backbone + learned feature warping + residual gated fusion | `lite_baseline` | `lite_baseline` |
+| `lite_v05` | same backbone + learned feature warping + residual gated fusion | `lite_baseline` | `lite_baseline`, `lite_baseline_ct` |
+| `lite_v06` (v0.4) | same backbone + ConvGRU fusion | `lite_baseline` | `lite_baseline`, `lite_baseline_ct` |
+| `lite_baseline_ct` (v0.4) | control for the lite family | `lite_baseline` | `lite_baseline` |
+
+Plain-language descriptions of every model and how they differ: the results page and
+`src/tac_ufld/models/descriptions.py`. The v0.4 tools for making the temporal models earn their cost
+(overfitting remedies, history-length ablation, current-frame degradation, aligned and recurrent fusion,
+equal-training controls, Kalman reference): [docs/TEMPORAL_IMPROVEMENTS.md](docs/TEMPORAL_IMPROVEMENTS.md).
+Plan, including the embedded phase: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Every model predicts, for each row anchor and lane slot, one of `griding_num + 1` classes (a horizontal cell or "no lane"), decoded with the official soft-argmax; existence is `1 − p(no lane)`.
 

@@ -30,6 +30,7 @@ class LoadedModel:
     postprocess: PostprocessParams
     postprocess_source: str
     meta: dict = field(default_factory=dict)
+    kalman: dict | None = None      # validation-tuned output tracker parameters, if the run tuned them
 
     @property
     def temporal(self) -> bool:
@@ -70,6 +71,13 @@ def _tuned_postprocess(checkpoint: Path, variant: str) -> tuple[PostprocessParam
     return None
 
 
+def _tuned_kalman(checkpoint: Path, variant: str) -> dict | None:
+    path = checkpoint.parent.parent / "postprocess" / f"{variant}_tuned.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8")).get("kalman")
+    return None
+
+
 def load_model(checkpoint: str | Path, device: str = "cpu", config_path: str | Path | None = None) -> LoadedModel:
     checkpoint = Path(checkpoint)
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -86,7 +94,8 @@ def load_model(checkpoint: str | Path, device: str = "cpu", config_path: str | P
         pp, source = tuned
     meta = {k: payload.get(k) for k in ("epoch", "score", "selection_metric", "seed", "version", "config_hash",
                                          "hyperparams")}
-    return LoadedModel(model, cfg, card, variant, checkpoint, device, pp, source, meta)
+    return LoadedModel(model, cfg, card, variant, checkpoint, device, pp, source, meta,
+                       kalman=_tuned_kalman(checkpoint, variant))
 
 
 class FramePreprocessor:

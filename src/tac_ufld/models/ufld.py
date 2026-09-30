@@ -13,6 +13,8 @@ The temporal models (``TemporalWeightedFusion`` = v02/v04,
 supervisor's notebook (``TACUFLDTemporalModel``,
 ``TACUFLDGatedTemporalModel``): every frame goes through the SAME UFLD
 backbone, features are fused, then the UFLD head classifies the fused map.
+v0.4 adds ``AlignedResidualFusion`` (v06, flow-aligned) and ``ConvGRUFusion``
+(v07, recurrent) from ``tac_ufld.models.fusion`` on the same skeleton.
 All of them hold the UFLD network as ``self.ufld`` so baseline weights
 warm-start the temporal models with a strict state-dict load.
 """
@@ -46,7 +48,7 @@ class UFLDNet(nn.Module):
     def __init__(
         self, num_lanes: int, num_row_anchors: int, griding_num: int,
         img_h: int, img_w: int, backbone: str = "18", pretrained: bool = True,
-        in_channels: int = 3, head_dropout: float = 0.0,
+        in_channels: int = 3, head_dropout: float = 0.0, head_hidden: int = 2048,
     ) -> None:
         super().__init__()
         self.cls_dim = (griding_num + 1, num_row_anchors, num_lanes)
@@ -54,7 +56,7 @@ class UFLDNet(nn.Module):
         self.pool = nn.Conv2d(ResNetBackbone.out_channels, 8, 1)
         self.flat_dim = 8 * math.ceil(img_h / 32) * math.ceil(img_w / 32)
         self.cls = nn.Sequential(
-            nn.Linear(self.flat_dim, 2048), nn.ReLU(), nn.Linear(2048, math.prod(self.cls_dim))
+            nn.Linear(self.flat_dim, head_hidden), nn.ReLU(), nn.Linear(head_hidden, math.prod(self.cls_dim))
         )
         # Optional, parameter-free: keeps the official state-dict layout (cls.0 / cls.2).
         self.head_dropout = nn.Dropout(head_dropout) if head_dropout > 0 else nn.Identity()
@@ -176,3 +178,17 @@ class UFLDTemporal(nn.Module):
 
     def fusion_parameters(self) -> list[nn.Parameter]:
         return list(self.fusion.parameters())
+
+    # -- recurrent fusion only (ufld_v07): carry one hidden state per stream
+
+    @property
+    def recurrent(self) -> bool:
+        return bool(getattr(self.fusion, "recurrent", False))
+
+    def recurrent_step(self, current: torch.Tensor, state: torch.Tensor | None) -> dict[str, torch.Tensor]:
+        """One streaming step with a carried hidden state (``None`` = start of stream)."""
+        if not self.recurrent:
+            raise TypeError("recurrent_step needs a recurrent fusion (ufld_v07)")
+        state = self.fusion.init_state(current) if state is None else state
+        state = self.fusion.step(current, state)
+        return {"logits": self.ufld.classify(self.fusion.readout(current, state)), "state": state}

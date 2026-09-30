@@ -55,6 +55,13 @@ ELAS geometry (real-data regression test), missing/unknown slots, ROI ignore row
 * Static results page for GitHub Pages; hand-off packager; `doctor`.
 * **GPU pilot** of the full protocol (2 seeds, ≤ 4 epochs, no HPO): completed in 2 h 22 min. Findings in `docs/PILOT_FINDINGS.md`.
 
+### v0.4: newly implemented and tested (`docs/TEMPORAL_IMPROVEMENTS.md`)
+* Overfitting remedies for UFLD: backbone learning-rate multiplier (also an HPO parameter), frozen early stages with frozen BatchNorm statistics, 8 more ELAS training scenes as an ablation arm, cross-dataset initialisation from official UFLD / own checkpoints (`model.init_checkpoint`; tested on a synthetic official-format checkpoint only).
+* Current-frame degradation (history kept clean), applied to every model.
+* New models: `ufld_v06` (aligned fusion), `ufld_v07` and `lite_v06` (ConvGRU; start exactly as their baseline; carried-state streaming mode), equal-training controls `ufld_baseline_ct` / `lite_baseline_ct`, all paired in the report.
+* Evaluation: validation-tuned output Kalman tracker for every model, per-condition F1 table, carried-state results; ablation specs with grids, explicit `allow` lists, shared `common` settings and reuse of identical baseline checkpoints (`configs/ablations/history.yaml`).
+* Results page: model explanations and differences, overfitting and history ablations, roadmap (`docs/ROADMAP.md`).
+
 ### Newly implemented but not validated
 * CULane, TuSimple and OpenLane on **real data** (no copy was available): run `python -m tac_ufld validate-dataset --dataset <name>` first. OpenLane's native metric settings follow our reading of the official 2D evaluation, not cross-checked.
 * ONNX Runtime on GPU (the PyPI GPU build needs CUDA 13; ran on CPU here).

@@ -39,10 +39,14 @@ def test_site_builds_from_a_run(tmp_path):
     run = _fake_run(tmp_path)
     notes = tmp_path / "notes.md"
     notes.write_text("# x\n- first **finding**\n- second `code`\n", encoding="utf-8")
-    index = build_site([run], tmp_path / "site", "Pilot Test", notes=notes)
+    roadmap = tmp_path / "roadmap.md"
+    roadmap.write_text("# r\n## Phase A\n- [done] built it\n- [later] embedded **last**\n", encoding="utf-8")
+    index = build_site([run], tmp_path / "site", "Pilot Test", notes=notes, roadmap=roadmap)
     text = index.read_text(encoding="utf-8")
+    assert "The models" in text and "Lite v0.5 warped" in text and "Difference" in text
+    assert 'class="pill done"' in text and "<strong>last</strong>" in text
     assert text.startswith("<!doctype html>") and "<title>TAC-UFLD Pilot Results</title>" in text
-    assert "prefers-color-scheme: dark" in text and ':root[data-theme="dark"]' in text
+    assert "color-scheme: light" in text and "body { background: var(--bg)" in text  # one explicit light look
     assert "<strong>finding</strong>" in text and "2 h 22 min" in text and "underpowered" in text
     assert "nan" not in re.sub(r"<[^>]+>", " ", text).lower().split()
     page = (tmp_path / "site" / "page.html").read_text(encoding="utf-8")

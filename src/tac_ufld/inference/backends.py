@@ -71,6 +71,12 @@ class TorchBackend:
     def full(self, clip) -> torch.Tensor:
         return self.model(self._in(clip))["logits"]
 
+    @torch.no_grad()
+    def step(self, current, state):
+        """Recurrent models only: one update of the carried hidden state."""
+        out = self.model.recurrent_step(self._in(current), None if state is None else self._in(state))
+        return out["logits"], out["state"]
+
     def synchronize(self) -> None:
         if self.device.startswith("cuda"):
             torch.cuda.synchronize()

@@ -33,6 +33,10 @@ def _checkpoint(tmp_path: Path, variant: str, cfg) -> Path:
         if isinstance(m, torch.nn.BatchNorm2d):
             m.running_mean.uniform_(-0.2, 0.2)
             m.running_var.uniform_(0.5, 1.5)
+    with torch.no_grad():  # zero-initialised layers (lite head, ConvGRU read-out) would hide the fusion
+        for p in model.parameters():
+            if p.dim() > 1 and not p.any():
+                p.normal_(0.0, 0.05)
     path = tmp_path / f"{variant}.pt"
     torch.save({"state_dict": model.state_dict(), "variant": variant, "config": cfg.to_dict(),
                 "card": model_card(cfg, variant)}, path)

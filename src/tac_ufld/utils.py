@@ -46,10 +46,17 @@ def setup_logging(log_file: Path | None = None, level: int = logging.INFO) -> lo
         root.addHandler(console)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        # One run log at a time: a process that runs several experiments (an
+        # ablation) must not keep writing into the previous runs' logs.
+        for h in [h for h in root.handlers if getattr(h, "_tac_ufld_run_log", False)
+                  and Path(h.baseFilename) != log_file.resolve()]:
+            root.removeHandler(h)
+            h.close()
         if not any(isinstance(h, logging.FileHandler) and Path(h.baseFilename) == log_file.resolve()
                    for h in root.handlers):
             handler = logging.FileHandler(log_file, encoding="utf-8")
             handler.setFormatter(fmt)
+            handler._tac_ufld_run_log = True
             root.addHandler(handler)
     return logging.getLogger("tac_ufld")
 

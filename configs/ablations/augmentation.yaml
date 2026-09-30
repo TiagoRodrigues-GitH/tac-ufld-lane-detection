@@ -6,7 +6,7 @@
 # the configuration every existing result used.
 
 name: ablation_augmentation
-description: "Augmentation and regularisation ablation on the UFLD baseline (ELAS)."
+description: "Augmentation and regularisation ablation on the UFLD baseline (ELAS): remedies for the overfitting seen in the pilot."
 base_config: configs/elas_pilot.yaml
 variants: [ufld_baseline]
 seeds: [1, 2, 3]
@@ -40,3 +40,29 @@ arms:
     model.head_dropout: 0.3
     train.loss.label_smoothing: 0.05
     train.weight_decay: 5.0e-4
+  # ---- v0.4: further remedies for the UFLD overfitting -------------------
+  # Lower learning rate for the ImageNet backbone (head keeps lr).
+  backbone_lr_0p1:
+    train.lr_backbone_mult: 0.1
+  # Freeze the stem and layer1 of the ResNet (weights and BatchNorm statistics).
+  freeze_stem_layer1:
+    train.freeze_backbone_stages: 2
+  # Occlude / blur / darken / add noise to the current frame only (30 % of
+  # the clips). For the single-frame baseline this is extra augmentation; for
+  # temporal models it forces the use of history (see configs/elas_pilot_v2.yaml).
+  current_frame_degradation:
+    data.augmentation.current_frame_prob: 0.3
+  # Smaller fully connected head (2048 -> 256 hidden units): the official
+  # head holds about 10 M parameters, the likeliest place to memorise ~2,900
+  # training frames. Not official UFLD any more; an overfitting test.
+  small_head:
+    model.ufld_head_hidden: 256
+  # More training scenes: the 10-scene plan + 8 further ELAS scenes. The
+  # held-out test scenes are unchanged (BR_S02, VIX_S05, VV_S03), so the test
+  # comparison is like for like. VV_S01/02/04 are left out on purpose (same
+  # city as the held-out VV_S03, which would then no longer be an unseen
+  # city); GRI_S02 is only distributed as images.zip.
+  more_scenes:
+    data.scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01,
+                  ROD_S01, ROD_S02, VIX_S01, VIX_S02, VIX_S06, VIX_S08, VIX_S09, VIX_S10]
+allow: [data.scenes]

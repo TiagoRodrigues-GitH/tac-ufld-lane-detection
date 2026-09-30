@@ -32,7 +32,7 @@ from tac_ufld.data.types import FrameRecord
 from tac_ufld.evaluation.evaluator import Evaluator
 from tac_ufld.evaluation.predictor import predict
 from tac_ufld.losses import Hyperparams, VariantLoss
-from tac_ufld.models.registry import VariantSpec
+from tac_ufld.models.registry import VariantSpec, backbone_module, freeze_stages
 from tac_ufld.postprocess import PostprocessParams
 
 LOGGER = logging.getLogger(__name__)
@@ -72,14 +72,27 @@ class Trainer:
         self.amp = cfg.train.amp and device.startswith("cuda")
         self.selection = cfg.evaluation.selection_metric
         self.val_params = PostprocessParams.from_config(cfg.evaluation.common_postprocess)
+        # Frozen early backbone stages: no gradients, BatchNorm statistics fixed.
+        self.frozen = freeze_stages(model, cfg.train.freeze_backbone_stages) \
+            if cfg.train.freeze_backbone_stages > 0 else []
 
     # ------------------------------------------------------------------ setup
 
     def _optimizer(self) -> torch.optim.Optimizer:
+        """Parameter groups: network (lr), backbone (lr * lr_backbone_mult, a
+        separate group only when the multiplier is not 1, so the original
+        single-group optimizer is unchanged by default) and fusion (lr_fusion)."""
         fusion = list(self.model.fusion_parameters()) if hasattr(self.model, "fusion_parameters") else []
         fusion_ids = {id(p) for p in fusion}
-        base = [p for p in self.model.parameters() if id(p) not in fusion_ids and p.requires_grad]
+        backbone_ids: set[int] = set()
+        if self.hp.lr_backbone_mult != 1.0:
+            backbone_ids = {id(p) for p in backbone_module(self.model).parameters()} - fusion_ids
+        base = [p for p in self.model.parameters()
+                if id(p) not in fusion_ids and id(p) not in backbone_ids and p.requires_grad]
         groups = [{"params": base, "lr": self.hp.lr}]
+        backbone = [p for p in self.model.parameters() if id(p) in backbone_ids and p.requires_grad]
+        if backbone:
+            groups.append({"params": backbone, "lr": self.hp.lr * self.hp.lr_backbone_mult})
         if fusion:
             groups.append({"params": fusion, "lr": self.hp.lr_fusion})
         t = self.cfg.train
@@ -107,6 +120,8 @@ class Trainer:
 
     def _train_epoch(self, optimizer, scheduler, scaler) -> dict[str, float]:
         self.model.train()
+        for stage in self.frozen:  # frozen stages keep their BatchNorm running statistics
+            stage.eval()
         sums: dict[str, float] = {}
         n_seen = 0
         autocast = torch.autocast("cuda") if self.amp else nullcontext()

@@ -135,9 +135,21 @@ with tabs[1]:
 # ------------------------------------------------------------------- models
 
 with tabs[2]:
+    from tac_ufld.models.descriptions import DIFFERENCES, KALMAN_NOTE, MODEL_NOTES
+
+    st.subheader("How the models differ")
+    for line in DIFFERENCES:
+        st.markdown(f"- {line}")
+    st.dataframe(pd.DataFrame([{"model": k, "role": n["role"], "frames": n["frames"], "history": n["history"],
+                                "aligns motion": n["aligns"], "memory": n["memory"], "origin": n["origin"]}
+                               for k, n in MODEL_NOTES.items()]), use_container_width=True, hide_index=True)
+    st.caption(KALMAN_NOTE)
     st.subheader("Architecture")
     if models:
         m = models[st.selectbox("Model", range(len(models)), format_func=lambda i: models[i].variant)]
+        note = MODEL_NOTES.get(m.variant)
+        if note:
+            st.markdown(f"**What it does.** {note['what']}\n\n**Difference.** {note['differs']}")
         st.json(m.card, expanded=False)
         params = core.parameter_table(m.model)
         st.metric("Parameters", f"{sum(p.numel() for p in m.model.parameters()) / 1e6:.2f} M")

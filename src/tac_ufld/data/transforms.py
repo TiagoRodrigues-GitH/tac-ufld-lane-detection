@@ -76,12 +76,51 @@ class PhotometricAugmenter:
 
     Optional extensions (all off by default, and then they draw no random
     numbers, so existing runs are reproduced exactly): gamma, hue rotation,
-    cast shadows, Gaussian blur and motion blur."""
+    cast shadows, Gaussian blur, motion blur, and current-frame degradation
+    (``current_frame_prob``: only the LAST frame of the clip, whose lanes are
+    the target, is occluded / blurred / darkened / made noisy, so a temporal
+    model has to take the lanes from its clean history frames)."""
 
     def __init__(self, cfg: AugmentationConfig) -> None:
         self.cfg = cfg
 
     def __call__(self, frames: torch.Tensor) -> torch.Tensor:
+        frames = self._photometric(frames)
+        if self.cfg.enabled and self.cfg.current_frame_prob > 0:
+            frames = self._degrade_current(frames)
+        return frames
+
+    def _degrade_current(self, frames: torch.Tensor) -> torch.Tensor:
+        """Degrade frames[-1] only; the history frames are returned untouched."""
+        cfg = self.cfg
+        if random.random() >= cfg.current_frame_prob:
+            return frames
+        frames = frames.clone()
+        cur = frames[-1]
+        c, h, w = cur.shape
+        op = random.choice(cfg.current_frame_ops)
+        if op == "occlude":  # solid boxes (vehicles, objects) centred in the road band
+            for _ in range(random.randint(*cfg.current_occlusion_boxes)):
+                area = random.uniform(*cfg.current_occlusion_scale) * h * w
+                aspect = random.uniform(0.5, 2.0)
+                bh = max(1, min(h, int((area / aspect) ** 0.5)))
+                bw = max(1, min(w, int((area * aspect) ** 0.5)))
+                cy = random.uniform(*cfg.current_occlusion_band) * (h - 1)
+                cx = random.uniform(0.0, w - 1.0)
+                y0 = int(max(0, min(h - bh, cy - bh / 2)))
+                x0 = int(max(0, min(w - bw, cx - bw / 2)))
+                cur[:, y0:y0 + bh, x0:x0 + bw] = torch.rand(c, 1, 1)
+        elif op == "blur":
+            sigma = random.uniform(*cfg.current_blur_sigma)
+            cur = _per_frame(cur.unsqueeze(0), lambda a: cv2.GaussianBlur(a, (0, 0), sigma).reshape(a.shape))[0]
+        elif op == "darken":
+            cur = cur * random.uniform(*cfg.current_darken)
+        else:  # noise
+            cur = (cur + torch.randn_like(cur) * random.uniform(*cfg.current_noise_std)).clamp(0.0, 1.0)
+        frames[-1] = cur
+        return frames
+
+    def _photometric(self, frames: torch.Tensor) -> torch.Tensor:
         cfg = self.cfg
         if not cfg.enabled or random.random() > cfg.prob:
             return frames

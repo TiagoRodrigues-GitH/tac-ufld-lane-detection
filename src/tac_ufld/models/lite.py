@@ -7,6 +7,8 @@
 * ``lite_v05``      = the warped residual temporal fusion
   (``LearnableFlowWarp`` + ``ResidualTemporalFusion``), previously labelled
   v02/v03/v04.
+* ``lite_v06``      = the same backbone and head with a ConvGRU recurrent
+  fusion (``tac_ufld.models.fusion.ConvGRUFusion``), added in v0.4.
 
 Change for a fair comparison (audit C3): v05 now uses the SAME current-frame
 backbone and head as ``lite_baseline`` and is warm-started from it, so the
@@ -193,21 +195,37 @@ class ResidualTemporalFusion(nn.Module):
         return f_cur + gate * (history - f_cur), gate, flows
 
 
-class LiteWarpTemporal(nn.Module):
-    """Streaming: the warp and the gate depend on the current frame and are
-    recomputed every step; the per-frame history features (backbone or tiny
-    encoder output) depend on their own frame only and are cached."""
+def _fusion_outputs(result) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """``ResidualTemporalFusion`` returns (fused, gate, flows); the v0.4
+    fusions return (fused, extras)."""
+    if len(result) == 2 and isinstance(result[1], dict):
+        return result
+    fused, gate, flows = result
+    return fused, {"gate": gate, "flows": flows}
+
+
+class LiteTemporal(nn.Module):
+    """Lite temporal model: the lite baseline's backbone and head around a
+    temporal fusion (default: the v0.5 warped residual fusion; ``fusion=``
+    any module mapping (B, T, C, h, w) -> (fused, extras), e.g. the ConvGRU
+    of lite_v06).
+
+    Streaming: the fusion depends on the current frame and is recomputed
+    every step; the per-frame history features (backbone or tiny encoder
+    output) depend on their own frame only and are cached."""
 
     temporal = True
 
     def __init__(self, backbone: LightweightBackbone, head: LanePixelHead, num_frames: int,
-                 history_encoder: str = "shared", in_channels: int = 3, dropout: float = 0.05) -> None:
+                 history_encoder: str = "shared", in_channels: int = 3, dropout: float = 0.05,
+                 fusion: nn.Module | None = None) -> None:
         super().__init__()
         self.backbone, self.head = backbone, head
         channels = backbone.out_channels
         self.history_encoder = (TinyHistoryEncoder(in_channels, channels, dropout=dropout)
                                 if history_encoder == "tiny" else None)
-        self.fusion = ResidualTemporalFusion(channels, num_frames, hidden=64, max_disp=8.0)
+        self.fusion = fusion if fusion is not None else ResidualTemporalFusion(
+            channels, num_frames, hidden=64, max_disp=8.0)
 
     def encode_frames(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         current = self.backbone(x)
@@ -217,8 +235,8 @@ class LiteWarpTemporal(nn.Module):
     def forward_features(self, history: list[torch.Tensor], current: torch.Tensor) -> dict[str, torch.Tensor]:
         if not history:
             return {"logits": self.head(current)}
-        fused, gate, flows = self.fusion(torch.stack([*history, current], dim=1))
-        return {"logits": self.head(fused), "gate": gate, "flows": flows}
+        fused, extras = _fusion_outputs(self.fusion(torch.stack([*history, current], dim=1)))
+        return {"logits": self.head(fused), **extras}
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, t, c, h, w = x.shape
@@ -228,8 +246,8 @@ class LiteWarpTemporal(nn.Module):
         encoder = self.history_encoder or self.backbone
         hist = encoder(x[:, :-1].reshape(b * (t - 1), c, h, w))
         feats = torch.cat([hist.reshape(b, t - 1, *feat_cur.shape[1:]), feat_cur.unsqueeze(1)], dim=1)
-        fused, gate, flows = self.fusion(feats)
-        return {"logits": self.head(fused), "gate": gate, "flows": flows}
+        fused, extras = _fusion_outputs(self.fusion(feats))
+        return {"logits": self.head(fused), **extras}
 
     def per_frame_logits(self, x: torch.Tensor, indices: tuple[int, ...]) -> list[torch.Tensor]:
         return [self.head(self.backbone(x[:, i])) for i in indices]
@@ -239,3 +257,21 @@ class LiteWarpTemporal(nn.Module):
         if self.history_encoder is not None:
             params += list(self.history_encoder.parameters())
         return params
+
+    # -- recurrent fusion only (lite_v06): carry one hidden state per stream
+
+    @property
+    def recurrent(self) -> bool:
+        return bool(getattr(self.fusion, "recurrent", False))
+
+    def recurrent_step(self, current: torch.Tensor, state: torch.Tensor | None) -> dict[str, torch.Tensor]:
+        """One streaming step with a carried hidden state (``None`` = start of
+        stream), updated from the backbone features of the current frame."""
+        if not self.recurrent:
+            raise TypeError("recurrent_step needs a recurrent fusion (lite_v06)")
+        state = self.fusion.init_state(current) if state is None else state
+        state = self.fusion.step(current, state)
+        return {"logits": self.head(self.fusion.readout(current, state)), "state": state}
+
+
+LiteWarpTemporal = LiteTemporal  # v0.3 name, kept for existing imports

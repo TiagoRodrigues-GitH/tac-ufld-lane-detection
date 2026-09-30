@@ -23,4 +23,4 @@ ablation        fair ablation runner; sanity: pre-training model checks
 site / package / doctor   results page, hand-off ZIP, environment checks
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

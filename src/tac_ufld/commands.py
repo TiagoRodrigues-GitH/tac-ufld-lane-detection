@@ -68,7 +68,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--backend", choices=["torch", "onnx", "tensorrt"], default="torch")
     p.add_argument("--deployment", help="deployment folder for onnx/tensorrt")
     p.add_argument("--precision", default="fp32")
-    p.add_argument("--mode", choices=["cached", "recompute"], default="cached")
+    p.add_argument("--mode", choices=["cached", "recompute", "carry"], default="cached",
+                   help="carry = one hidden state per stream (recurrent models ufld_v07 / lite_v06)")
+    p.add_argument("--kalman", action="store_true",
+                   help="filter the lanes with the output Kalman tracker (validation-tuned values when the run "
+                        "tuned them, defaults otherwise)")
     p.add_argument("--every", type=int, default=1, help="process every n-th frame (simulates drops)")
     p.add_argument("--max-frames", type=int)
     p.add_argument("--out", help="overlay video path (default: results/streams/<name>.mp4)")
@@ -100,6 +104,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--out", default=str(PROJECT_ROOT / "site"))
     p.add_argument("--title", default="TAC-UFLD pilot results")
     p.add_argument("--extra", nargs="*", default=[], help="extra JSON/Markdown reports to embed (benchmarks, checks)")
+    p.add_argument("--notes", help="Markdown file whose '- ' bullets are the findings (default docs/PILOT_FINDINGS.md)")
+    p.add_argument("--roadmap", help="roadmap Markdown (default docs/ROADMAP.md)")
 
     p = sub.add_parser("package", help="supervisor hand-off ZIP")
     p.add_argument("--out", default=str(PROJECT_ROOT / "dist"))
@@ -350,7 +356,12 @@ def cmd_stream(args) -> int:
     device = _device(args.device)
     loaded = load_model(args.checkpoint, device)
     backend = make_backend(args.backend, loaded, args.deployment, args.precision, device)
-    det = StreamingLaneDetector(loaded, backend=backend, mode=args.mode)
+    tracker = None
+    if args.kalman:
+        from tac_ufld.evaluation.tracking import KalmanParams
+
+        tracker = KalmanParams(**loaded.kalman) if loaded.kalman else KalmanParams(threshold=loaded.postprocess.threshold)
+    det = StreamingLaneDetector(loaded, backend=backend, mode=args.mode, tracker=tracker)
     name = Path(args.video or args.images).stem
     out = Path(args.out) if args.out else PROJECT_ROOT / "results" / "streams" / f"{name}_{loaded.variant}.mp4"
     records, sink = [], VideoSink(out, fps=10)
@@ -370,7 +381,8 @@ def cmd_stream(args) -> int:
                         "lane_confidence": res.lane_confidence, **res.latency_ms,
                         "lanes": [None if l is None else np.round(l, 1).tolist() for l in res.lanes]})
     sink.close()
-    summary = {"frames": len(records), "backend": backend.name, "mode": args.mode, "video": str(out)}
+    summary = {"frames": len(records), "backend": backend.name, "mode": args.mode, "video": str(out),
+               "kalman": None if tracker is None else tracker.as_dict()}
     for key in ("preprocess_ms", "model_ms", "postprocess_ms", "total_ms"):
         vals = [r[key] for r in records[3:]] or [r[key] for r in records]
         summary[f"{key}_mean"] = float(np.mean(vals)) if vals else float("nan")
@@ -441,7 +453,9 @@ def cmd_ui(args) -> int:
 def cmd_site(args) -> int:
     from tac_ufld.site import build_site
 
-    print(build_site([Path(r) for r in args.runs], Path(args.out), args.title, [Path(e) for e in args.extra]))
+    print(build_site([Path(r) for r in args.runs], Path(args.out), args.title, [Path(e) for e in args.extra],
+                     notes=Path(args.notes) if args.notes else None,
+                     roadmap=Path(args.roadmap) if args.roadmap else None))
     return 0
 
 

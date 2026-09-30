@@ -1,0 +1,79 @@
+# Second GPU pilot (v0.4): the first pilot's protocol with the v0.4 models
+# and training recipe, to see whether a temporal model now beats its
+# single-frame baseline before the full run.
+#
+#   python -m tac_ufld run --config configs/elas_pilot_v2.yaml
+#
+# Differences from configs/elas_pilot.yaml:
+# * models: + UFLD v0.6 (aligned fusion), UFLD v0.7 and lite v0.6 (ConvGRU),
+#   + the equal-training controls ufld_baseline_ct / lite_baseline_ct;
+# * current-frame degradation for every model (30 % of the clips: only the
+#   current frame is occluded / blurred / darkened / made noisy);
+# * the UFLD overfitting remedy selected by the augmentation ablation
+#   (configs/ablations/augmentation.yaml, see docs/PILOT_V2_FINDINGS.md);
+# * evaluation: Kalman reference, per-condition F1, carried-state results.
+# Same split, seeds (2), epoch budget (<= 4, patience 2) and no HPO, so the
+# numbers are comparable with the first pilot and equally indicative.
+
+name: elas_pilot_v2
+output_dir: results
+device: auto
+description: "GPU pilot 2 (v0.4 models and recipe): full ELAS protocol, 2 seeds, <= 4 epochs, no HPO. Indicative only."
+
+data:
+  dataset: elas
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
+  scenes: [BR_S01, BR_S02, ROD_S03, VIX_S03, VIX_S04, VIX_S05, VIX_S07, VIX_S11, VV_S03, GRI_S01]
+  scene_tags:
+    BR_S01: {transition: true}
+    BR_S02: {transition: true}
+    ROD_S03: {rainy: true}
+    VIX_S03: {occlusion: true, transition: true}
+    VIX_S04: {transition: true}
+    VIX_S05: {occlusion: true}
+    VIX_S07: {shaky: true, transition: true}
+    VIX_S11: {}
+    VV_S03: {transition: true}
+    GRI_S01: {transition: true}
+  img_h: 384
+  img_w: 512
+  num_lanes: 2
+  num_row_anchors: 18
+  row_anchor_range: [0.59, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 2
+  normalize: imagenet
+  num_workers: 4
+  augmentation:
+    current_frame_prob: 0.3
+  split:
+    split_seed: 2026
+    test_scenes: [BR_S02, VIX_S05, VV_S03]
+    block_size: 60
+    purge_frames: 10
+    val_fraction: 0.2
+    seen_test_fraction: 0.15
+
+model:
+  variants: [ufld_baseline, ufld_baseline_ct, ufld_v02, ufld_v03, ufld_v04, ufld_v06, ufld_v07,
+             lite_baseline, lite_baseline_ct, lite_v05, lite_v06]
+  pretrained: true
+
+train:
+  seeds: [1, 2]
+  epochs: 4
+  early_stopping_patience: 2
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid:
+    threshold: [0.4, 0.5, 0.6]
+    min_points: [2, 3]
+    poly_degree: [0, 1]
+  latency_runs: 30
+  n_visual_examples: 8
+  visualize_seeds: 1
+  tensorboard: true
