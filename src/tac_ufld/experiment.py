@@ -366,6 +366,7 @@ class ExperimentRunner:
                                      "input": input_mode, **res.metrics,
                                      **{f"pp_{k}": v for k, v in params.as_dict().items()}, **kf_cols})
                         if protocol == "tuned" and input_mode == "full":
+                            self._log_metrics(variant, seed, split, res.metrics)
                             res.per_frame.to_csv(seed_dir / "per_frame" / f"{variant}_{split}.csv", index=False)
                             if split == "test":
                                 test_lanes[variant] = res.pred_lanes
@@ -383,6 +384,19 @@ class ExperimentRunner:
             overlays.save_temporal_video(records, {self.labels[v]: l for v, l in test_lanes.items()},
                                          seed_dir / "visuals" / "test_sequence.mp4")
         return pd.DataFrame(rows)
+
+    def _log_metrics(self, variant: str, seed: int, split: str, metrics: dict[str, float]) -> None:
+        """Two separate log lines: the internal metrics (identical for every
+        dataset; pixel_f1 = the original script's polyline_pixel_f1) and the
+        dataset's own benchmark metric (native_*; none for ELAS)."""
+        tag = self.evaluator.primary_tag
+        LOGGER.info("[metrics internal] %s seed %d %s: lane_f1_%s=%.4f pixel_f1=%.4f anchor_f1=%.4f jitter_px=%.2f",
+                    variant, seed, split, tag, metrics[f"lane_f1_{tag}"], metrics["pixel_f1"],
+                    metrics.get("anchor_f1", float("nan")), metrics.get("jitter_px", float("nan")))
+        native = {k: v for k, v in metrics.items() if k.startswith("native_") and k != "native_frames"}
+        if native:
+            LOGGER.info("[metrics native %s] %s seed %d %s: %s", self.cfg.data.dataset, variant, seed, split,
+                        ", ".join(f"{k}={v:.4f}" for k, v in sorted(native.items())))
 
     # ================================================================ report
 
