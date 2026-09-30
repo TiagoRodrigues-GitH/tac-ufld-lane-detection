@@ -319,3 +319,26 @@ def test_static_history_control_sees_only_the_current_frame(tiny_config):
     assert not all(torch.equal(real[i]["images"][0], real[i]["images"][-1]) for i in range(4))
     assert model_card(cfg, "lite_v05_static")["static_history"] and not model_card(cfg, "lite_v05")["static_history"]
     assert VARIANTS["lite_v05"].static_reference == "lite_v05_static"
+
+
+def test_eval_degradation_is_deterministic_and_leaves_history_clean(tiny_config):
+    from tac_ufld.data import build_adapter
+    from tac_ufld.data.dataset import TemporalLaneDataset
+    from tac_ufld.data.splits import build_splits
+    from tac_ufld.data.targets import make_row_anchors
+
+    cfg = tiny_config
+    d = cfg.data
+    adapter = build_adapter(cfg)
+    splits, _ = build_splits(cfg, adapter)
+    anchors = make_row_anchors(d.img_h, d.num_row_anchors, d.row_anchor_range)
+    recs = splits.test[:6]
+    clean = TemporalLaneDataset(recs, adapter, d, anchors, d.num_frames)
+    a = TemporalLaneDataset(recs, adapter, d, anchors, d.num_frames, eval_degradation_seed=7)
+    b = TemporalLaneDataset(recs, adapter, d, anchors, d.num_frames, eval_degradation_seed=7)
+    assert a.eval_ops == b.eval_ops and set(a.eval_ops) <= {"occlude", "blur", "darken", "noise"}
+    for i in range(len(recs)):
+        x, y, c = a[i]["images"], b[i]["images"], clean[i]["images"]
+        assert torch.equal(x, y)                      # same corruption for every model
+        assert torch.equal(x[:-1], c[:-1])            # history untouched
+        assert not torch.equal(x[-1], c[-1])          # current frame degraded

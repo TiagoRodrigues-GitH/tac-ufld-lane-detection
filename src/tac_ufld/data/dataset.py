@@ -17,6 +17,7 @@ runners do at deployment time (``tac_ufld.inference``).
 from __future__ import annotations
 
 import logging
+import random
 
 import numpy as np
 import torch
@@ -27,7 +28,7 @@ from tac_ufld.data.base import LaneDatasetAdapter
 from tac_ufld.data.geometric import GeometricAugmenter, encode_targets_warped, warp_frames
 from tac_ufld.data.preprocess import Preprocessor, channel_stats, normalize_channels
 from tac_ufld.data.targets import encode_targets
-from tac_ufld.data.transforms import PhotometricAugmenter, load_frame
+from tac_ufld.data.transforms import PhotometricAugmenter, degrade_current_frame, load_frame
 from tac_ufld.data.types import FrameRecord
 
 LOGGER = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class TemporalLaneDataset(Dataset):
         num_frames: int,
         augment: bool = False,
         static_history: bool = False,
+        eval_degradation_seed: int | None = None,
     ) -> None:
         self.records = records
         self.cfg = cfg
@@ -56,6 +58,14 @@ class TemporalLaneDataset(Dataset):
         # repeated num_frames times, built after augmentation so every position
         # carries the same (possibly degraded) image and no temporal information.
         self.static_history = static_history
+        # Robustness evaluation: every item's CURRENT frame is degraded with one
+        # of the configured ops, chosen and parameterised by a fixed per-item
+        # seed, so every model sees exactly the same corruptions; the history
+        # frames stay clean. ``eval_ops[i]`` is the op of item i.
+        self.eval_degradation_seed = eval_degradation_seed
+        ops = list(cfg.augmentation.current_frame_ops)
+        self.eval_ops = ([random.Random(f"{eval_degradation_seed}:{i}").choice(ops) for i in range(len(records))]
+                         if eval_degradation_seed is not None else None)
         self.row_anchors = row_anchors
         self.augmenter = PhotometricAugmenter(cfg.augmentation) if augment else None
         geo = cfg.augmentation.geometric
@@ -97,6 +107,11 @@ class TemporalLaneDataset(Dataset):
         cfg = self.cfg
         paths = self.context_paths[idx][-1:] if self.static_history else self.context_paths[idx]
         frames = torch.stack([load_frame(p, cfg.img_w, cfg.img_h) for p in paths])
+        if self.eval_ops is not None:
+            rng = random.Random(f"{self.eval_degradation_seed}:{idx}")
+            op = rng.choice(list(cfg.augmentation.current_frame_ops))
+            gen = torch.Generator().manual_seed(int(self.eval_degradation_seed) * 1_000_003 + idx)
+            frames = degrade_current_frame(frames, cfg.augmentation, op, rng, gen)
         t = self.targets[idx]
         if self.geometric is not None:
             sampled = self.geometric.sample(cfg.img_w, cfg.img_h)

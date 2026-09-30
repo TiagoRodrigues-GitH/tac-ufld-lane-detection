@@ -69,6 +69,42 @@ def _shadow_mask(h: int, w: int) -> np.ndarray:
     return mask
 
 
+def degrade_current_frame(frames: torch.Tensor, cfg: AugmentationConfig, op: str, rng=random,
+                          generator: torch.Generator | None = None) -> torch.Tensor:
+    """Apply one degradation ``op`` (occlude | blur | darken | noise) to the
+    LAST frame of the clip (RGB in [0, 1]); earlier frames are untouched.
+
+    ``rng`` (the ``random`` module or a ``random.Random``) and ``generator``
+    (a ``torch.Generator``, None = global) make it reproducible: training uses
+    the global streams, the robustness evaluation a fixed seed per frame."""
+    frames = frames.clone()
+    cur = frames[-1]
+    c, h, w = cur.shape
+    if op == "occlude":  # solid boxes (vehicles, objects) centred in the road band
+        for _ in range(rng.randint(*cfg.current_occlusion_boxes)):
+            area = rng.uniform(*cfg.current_occlusion_scale) * h * w
+            aspect = rng.uniform(0.5, 2.0)
+            bh = max(1, min(h, int((area / aspect) ** 0.5)))
+            bw = max(1, min(w, int((area * aspect) ** 0.5)))
+            cy = rng.uniform(*cfg.current_occlusion_band) * (h - 1)
+            cx = rng.uniform(0.0, w - 1.0)
+            y0 = int(max(0, min(h - bh, cy - bh / 2)))
+            x0 = int(max(0, min(w - bw, cx - bw / 2)))
+            cur[:, y0:y0 + bh, x0:x0 + bw] = torch.rand(c, 1, 1, generator=generator)
+    elif op == "blur":
+        sigma = rng.uniform(*cfg.current_blur_sigma)
+        cur = _per_frame(cur.unsqueeze(0), lambda a: cv2.GaussianBlur(a, (0, 0), sigma).reshape(a.shape))[0]
+    elif op == "darken":
+        cur = cur * rng.uniform(*cfg.current_darken)
+    elif op == "noise":
+        noise = torch.randn(cur.shape, generator=generator, dtype=cur.dtype)
+        cur = (cur + noise * rng.uniform(*cfg.current_noise_std)).clamp(0.0, 1.0)
+    else:
+        raise ValueError(f"unknown current-frame degradation '{op}'")
+    frames[-1] = cur
+    return frames
+
+
 class PhotometricAugmenter:
     """Colour jitter, Gaussian noise, random erasing and history-frame dropout,
     sampled once per clip so every frame of a sequence is changed identically.
@@ -95,30 +131,7 @@ class PhotometricAugmenter:
         cfg = self.cfg
         if random.random() >= cfg.current_frame_prob:
             return frames
-        frames = frames.clone()
-        cur = frames[-1]
-        c, h, w = cur.shape
-        op = random.choice(cfg.current_frame_ops)
-        if op == "occlude":  # solid boxes (vehicles, objects) centred in the road band
-            for _ in range(random.randint(*cfg.current_occlusion_boxes)):
-                area = random.uniform(*cfg.current_occlusion_scale) * h * w
-                aspect = random.uniform(0.5, 2.0)
-                bh = max(1, min(h, int((area / aspect) ** 0.5)))
-                bw = max(1, min(w, int((area * aspect) ** 0.5)))
-                cy = random.uniform(*cfg.current_occlusion_band) * (h - 1)
-                cx = random.uniform(0.0, w - 1.0)
-                y0 = int(max(0, min(h - bh, cy - bh / 2)))
-                x0 = int(max(0, min(w - bw, cx - bw / 2)))
-                cur[:, y0:y0 + bh, x0:x0 + bw] = torch.rand(c, 1, 1)
-        elif op == "blur":
-            sigma = random.uniform(*cfg.current_blur_sigma)
-            cur = _per_frame(cur.unsqueeze(0), lambda a: cv2.GaussianBlur(a, (0, 0), sigma).reshape(a.shape))[0]
-        elif op == "darken":
-            cur = cur * random.uniform(*cfg.current_darken)
-        else:  # noise
-            cur = (cur + torch.randn_like(cur) * random.uniform(*cfg.current_noise_std)).clamp(0.0, 1.0)
-        frames[-1] = cur
-        return frames
+        return degrade_current_frame(frames, cfg, random.choice(cfg.current_frame_ops))
 
     def _photometric(self, frames: torch.Tensor) -> torch.Tensor:
         cfg = self.cfg

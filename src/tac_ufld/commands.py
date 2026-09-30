@@ -8,6 +8,7 @@ handlers so ``--help`` stays fast.
     stream      streaming inference on a video or image folder -> overlay video + JSON
     benchmark   latency / memory on this machine + real-time budget simulation
     ui          Streamlit interface (inference and results only; never trains)
+    robustness  held-out lane F1 with a degraded current frame (history clean)
     site        static HTML results page (GitHub Pages) from finished runs
     package     supervisor hand-off ZIP (code, configs, docs; no data/checkpoints)
     doctor      environment, GPU, optional dependency and dataset checks
@@ -98,6 +99,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--results", default=str(PROJECT_ROOT / "results"))
     p.add_argument("--port", type=int, default=8501)
     p.add_argument("--headless", action="store_true")
+
+    p = sub.add_parser("robustness", help="held-out lane F1 with a degraded current frame (history clean)")
+    p.add_argument("--runs", nargs="+", required=True, help="finished run folders (e.g. results/elas_pilot_v2)")
+    p.add_argument("--seed", type=int, default=2026, help="seed of the per-frame degradations")
+    p.add_argument("--device", default="auto")
+    p.add_argument("--workers", type=int, default=2)
 
     p = sub.add_parser("site", help="static results page for GitHub Pages")
     p.add_argument("--runs", nargs="+", required=True, help="results folders (e.g. results/elas_pilot)")
@@ -447,6 +454,22 @@ def cmd_ui(args) -> int:
         cmd += ["--server.headless", "true"]
     cmd += ["--", "--results", args.results]
     return subprocess.call(cmd)
+
+
+@_handler("robustness")
+def cmd_robustness(args) -> int:
+    from tac_ufld.evaluation.robustness import evaluate_run
+    from tac_ufld.utils import setup_logging
+
+    setup_logging()
+    device = _device(args.device)
+    for run in args.runs:
+        summary = evaluate_run(Path(run), device, seed=args.seed, workers=args.workers)
+        overall = summary[summary["op"] == "all"][["variant", "input", "clean_lane_f1", "lane_f1", "drop_vs_clean"]]
+        print()
+        print(run)
+        print(overall.round(3).to_string(index=False))
+    return 0
 
 
 @_handler("site")

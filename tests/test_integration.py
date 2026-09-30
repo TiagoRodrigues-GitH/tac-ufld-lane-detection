@@ -71,3 +71,9 @@ def test_v04_pipeline_with_new_models_controls_and_temporal_references(tiny_conf
         assert section in text
     tuned = json.loads((runner.out / "seed_1" / "postprocess" / "ufld_v07_tuned.json").read_text(encoding="utf-8"))
     assert tuned["kalman"]["q"] == 1.0
+    from tac_ufld.evaluation.robustness import evaluate_run
+
+    summary = evaluate_run(runner.out, "cpu", workers=0)
+    overall = summary[(summary["op"] == "all") & (summary["input"] == "degraded")]
+    assert set(overall["variant"]) == set(variants) and overall["lane_f1"].between(0, 1).all()
+    assert {"degraded+kalman"} <= set(summary["input"]) and (runner.out / "report" / "robustness.csv").exists()
