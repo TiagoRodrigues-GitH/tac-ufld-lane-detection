@@ -94,3 +94,26 @@ def test_choice_section_is_bilingual_and_keeps_model_names(tmp_path):
     assert html.index('lang="pt"') < html.index('lang="en"')  # Portuguese first
     assert "usar <strong>v0.3</strong>" in html and "referência" in html
     assert "v0,3" not in html  # model names keep their dot
+
+
+def test_portuguese_page_has_authors_no_english_left_and_prints_on_a4(tmp_path):
+    from tac_ufld.site_i18n import translate_html
+
+    run = _fake_run(tmp_path)
+    notes = tmp_path / "notes.md"
+    notes.write_text("- english **finding**\n", encoding="utf-8")
+    notes.with_name("notes.pt.md").write_text("- resultado em **português**\n", encoding="utf-8")
+    index = build_site([run], tmp_path / "pt", "T", notes=notes, lang="pt",
+                       authors=["Tiago Rodrigues", "Eva Laussac", "Everton Gomede"], affiliation="UTFPR, Brazil")
+    text = index.read_text(encoding="utf-8")
+    assert '<html lang="pt-BR">' in text and "<title>Resultados TAC-UFLD</title>" in text
+    assert "Autores:" in text and "Tiago Rodrigues, Eva Laussac, Everton Gomede · UTFPR, Brasil" in text
+    assert "Onde a pesquisa está" in text and "Lane F1 em estradas nunca vistas" in text
+    assert "resultado em <strong>português</strong>" in text and "english" not in text  # only the PT findings
+    assert (tmp_path / "pt" / "untranslated.txt").read_text(encoding="utf-8") == ""
+    assert "@media print" in text and "size: A4" in text
+    # decimal comma in text, not in model names, code or markup
+    out, missing = translate_html('<p>Lane F1 0.881 for UFLD v0.3 gated</p><code>x 0.5</code>'
+                                  '<span class="en" lang="en">English half</span>')
+    assert "0,881" in out and "v0.3" in out and "<code>x 0.5</code>" in out and "English half" not in out
+    assert missing == ["Lane F1 0.881 for UFLD v0.3 gated"]

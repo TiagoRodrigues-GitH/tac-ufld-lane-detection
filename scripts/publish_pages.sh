@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Publish the static results page to the `gh-pages` branch (GitHub Pages).
 #
-#   bash scripts/publish_pages.sh                       # default runs, findings and title (below)
+#   bash scripts/publish_pages.sh                       # default runs, findings, title, authors (below)
 #   bash scripts/publish_pages.sh --runs results/<run> [results/<run2> ...] --notes <findings.md> --title "..."
 #
-# Builds site/ with `python -m tac_ufld site` (arguments are passed through),
+# Builds site/ (English) and site/pt/ (Portuguese) with `python -m tac_ufld site` (arguments are passed through),
 # copies it into a temporary worktree of the gh-pages branch (created as an
 # orphan branch the first time), commits and pushes. The working branch is
 # not touched. Then, once: GitHub -> Settings -> Pages -> Build and deployment
@@ -17,10 +17,11 @@ PY="${PYTHON:-python}"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 if [ $# -eq 0 ]; then
-  set -- --runs results/elas_pilot_v2 results/elas_lite_long --notes docs/PILOT_V2_FINDINGS.md          --title "TAC-UFLD: temporal lane detection pilots"
+  set -- --runs results/elas_pilot_v2 results/elas_lite_long --notes docs/PILOT_V2_FINDINGS.md          --title "TAC-UFLD: temporal lane detection pilots"          --authors "Tiago Rodrigues" "Eva Laussac" "Everton Gomede" --affiliation "UTFPR, Cornélio Procópio, Brazil"
 fi
 
-"$PY" -m tac_ufld site --out site "$@"
+"$PY" -m tac_ufld site --out site "$@"              # English page at the site root
+"$PY" -m tac_ufld site --out site/pt --lang pt "$@"  # Portuguese page at /pt/
 WT="$(mktemp -d)"
 cleanup() { git worktree remove --force "$WT" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -36,7 +37,7 @@ fi
 
 find "$WT" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
 cp -r site/. "$WT"/
-rm -f "$WT/page.html"   # embedding variant, not needed on Pages
+rm -f "$WT/page.html" "$WT/pt/page.html" "$WT/pt/untranslated.txt"   # not needed on Pages
 (
   cd "$WT"
   git add -A

@@ -114,6 +114,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--notes", help="Markdown file whose '- ' bullets are the findings (default docs/PILOT_FINDINGS.md)")
     p.add_argument("--roadmap", help="roadmap Markdown (default docs/ROADMAP.md)")
     p.add_argument("--summary", help="challenges / next steps Markdown for the overview (default docs/RESEARCH_SUMMARY.md)")
+    p.add_argument("--lang", choices=["en", "pt"], default="en", help="page language (pt = Brazilian Portuguese)")
+    p.add_argument("--authors", nargs="*", default=None, help='author names shown under the title, e.g. "Tiago Rodrigues"')
+    p.add_argument("--affiliation", help="affiliation shown after the authors")
 
     p = sub.add_parser("package", help="supervisor hand-off ZIP")
     p.add_argument("--out", default=str(PROJECT_ROOT / "dist"))
@@ -480,7 +483,8 @@ def cmd_site(args) -> int:
     print(build_site([Path(r) for r in args.runs], Path(args.out), args.title, [Path(e) for e in args.extra],
                      notes=Path(args.notes) if args.notes else None,
                      roadmap=Path(args.roadmap) if args.roadmap else None,
-                     summary=Path(args.summary) if args.summary else None))
+                     summary=Path(args.summary) if args.summary else None, lang=args.lang,
+                     authors=args.authors, affiliation=args.affiliation))
     return 0
 
 

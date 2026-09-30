@@ -147,6 +147,31 @@ footer { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--rul
 th .en { text-transform: none; letter-spacing: 0; font-family: var(--body); }
 .h2en { font-size: 16px; margin-top: 4px; font-family: var(--body); }
 table.choice td.wrap { min-width: 190px; } table.choice td { vertical-align: top; }
+.authors { font-size: 15.5px; color: var(--ink); max-width: none; } .authors .k { font-weight: 600; }
+@media print {
+  @page { size: A4; margin: 12mm 11mm; }
+  html { zoom: 0.72; }
+  body { background: #ffffff; }
+  /* Chromium overlaps grid items that move across a page break, so every
+     grid becomes block layout on paper; paired panels become inline blocks. */
+  main.wrap, section, .panel, figure, .phase, .cards { display: block; max-width: none; }
+  main.wrap { padding-block: 0; }
+  section > * + *, .panel > * + *, figure > * + *, .cards > * + * { margin-top: 12px; }
+  main.wrap > * + * { margin-top: 28px; }
+  main.wrap > section:not(#summary) { break-before: page; }
+  .charts, .grid2, .plan, .shots, .findings, .findings ul, .plan ul, .plan ol, .phase ul { display: block; }
+  .charts > *, .grid2 > *, .shots > * { display: inline-block; width: calc(50% - 8px);
+    vertical-align: top; margin: 0 12px 12px 0; }
+  .charts > *:nth-child(2n), .grid2 > *:nth-child(2n), .shots > *:nth-child(2n) { margin-right: 0; }
+  .plan > * { display: block; width: auto; margin: 0 0 12px 0; break-inside: auto; }
+  .plan li + li, .phase li + li, .findings li + li { margin-top: 6px; }
+  .kpis { break-inside: avoid; }
+  .scroll { overflow: visible; } th, td { white-space: normal; }
+  .panel, .kpi, .card, figure, tr, .findings li, .phase li, pre, header.top { break-inside: avoid; }
+  h2, h3 { break-after: avoid; }
+  #demo, video { display: none; }
+  a { color: inherit; text-decoration: none; }
+}
 .plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; }
 .plan ul, .plan ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
 .plan li { font-size: 14.5px; }
@@ -555,6 +580,15 @@ def models_section(efficiency: pd.DataFrame | None, present: set[str]) -> str:
             f'<p class="lede"><strong>Reference, not a model:</strong> {esc(KALMAN_NOTE)}</p></section>')
 
 
+ARM_LABELS = {"backbone_lr_0p1": "backbone lr ×0.1", "freeze_stem_layer1": "frozen stem + layer1",
+              "current_frame_degradation": "current-frame degradation", "small_head": "small head (256)",
+              "more_scenes": "more scenes (18)"}
+
+
+def _arm_label(arm: str) -> str:
+    return ARM_LABELS.get(arm, arm.replace("_", " "))
+
+
 def _augmentation_section(root: Path) -> str:
     agg = _read(root / "ablation_augmentation" / "ablation_aggregate.csv")
     paired = _read(root / "ablation_augmentation" / "ablation_paired_tests.csv")
@@ -581,10 +615,10 @@ def _augmentation_section(root: Path) -> str:
                 verdict = f'{r.mean_delta:+.3f} {_verdict(r)}'
         rows.append((arm, vals, np.asarray(val_scores), best_epochs, verdict))
     rows.sort(key=lambda r: -np.nanmean(r[2]) if len(r[2]) else 0.0)
-    body = "".join(f'<tr><td>{esc(a.replace("_", " "))}</td><td class="num">{_mean_std(val, 3)}</td>'
+    body = "".join(f'<tr><td>{esc(_arm_label(a))}</td><td class="num">{_mean_std(val, 3)}</td>'
                    f'<td class="num">{_mean_std(v, 3)}</td><td class="num">{", ".join(map(str, e)) or "n/a"}</td>'
                    f'<td>{verdict or "reference"}</td></tr>' for a, v, val, e, verdict in rows)
-    chart = bar_chart([{"variant": "ufld_baseline", "label": a.replace("_", " "), "mean": float(np.nanmean(v)),
+    chart = bar_chart([{"variant": "ufld_baseline", "label": _arm_label(a), "mean": float(np.nanmean(v)),
                         "seeds": v.tolist()} for a, v, _, _, _ in rows], "lane F1 per arm", width=820, left=210)
     return ('<section id="overfitting"><h2>Fixing the UFLD overfitting</h2><p class="lede">The first pilot showed '
             'every UFLD run peaking at epoch 1. Each arm below changes one thing in the training of the UFLD baseline '
@@ -839,7 +873,8 @@ def _family_views(run: Path, df: pd.DataFrame, extra_runs: list[Path]):
     return main, lite_run, lite, both, eff
 
 
-def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summary: Path | None) -> str:
+def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summary: Path | None,
+                     lang: str = "en") -> str:
     """One-screen overview for a short presentation: key figures and the four
     most telling charts, all computed from the run folders, plus the
     hand-written challenges and next steps (``docs/RESEARCH_SUMMARY.md``)."""
@@ -861,7 +896,7 @@ def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summar
         arm_rows = []
         for arm in dict.fromkeys(a["arm"]):
             v = a[a["arm"] == arm][metric].astype(float)
-            arm_rows.append({"variant": "ufld_baseline", "label": arm.replace("_", " "), "mean": float(v.mean()),
+            arm_rows.append({"variant": "ufld_baseline", "label": _arm_label(arm), "mean": float(v.mean()),
                              "seeds": v.tolist()})
         arm_rows.sort(key=lambda r: -r["mean"])
         panels.append(("1 · Overfitting: what fixed it", bar_chart(arm_rows, "held-out lane F1 per training recipe",
@@ -961,6 +996,8 @@ def _summary_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], summar
                            "Spacing changes little; five frames are worse than three."))
 
     plan = _md_lists(summary) if summary is not None and summary.exists() else {}
+    if lang == "pt":  # only the Portuguese lists on the Portuguese page
+        plan = {k: v for k, v in plan.items() if k in ("Desafios", "Próximos passos")}
     tiles = "".join(f'<div class="kpi"><span class="k">{esc(k)}</span><span class="v">{esc(v)}</span>'
                     f'<span class="l">{esc(l)}</span></div>' for k, v, l in kpis)
     charts = "".join(f'<figure class="panel"><h3>{esc(t)}</h3>{svg}<figcaption>{cap}</figcaption></figure>'
@@ -987,7 +1024,8 @@ def _pt(text: str) -> str:
     return re.sub(r"(?<![\w.])(\d+)\.(\d+)", r"\1,\2", text)  # not in names like v0.3
 
 
-def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: Path | None) -> str:
+def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: Path | None,
+                    lang: str = "en") -> str:
     """Which model to compare with the baseline: per situation, which model
     beats the UFLD baseline (numbers computed from the runs), a side-by-side
     table of the candidates, and the hand-written recommendation and model
@@ -995,6 +1033,7 @@ def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: 
     import yaml
 
     metric, base, occ = "lane_f1_iou50", "ufld_baseline", "occlude"
+    page_lang = lang
     main, lite_run, lite, both, eff = _family_views(run, df, extra_runs)
     f1 = both.groupby("variant")[metric].mean()
     if base not in f1:
@@ -1149,7 +1188,8 @@ def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: 
         ("Perda sem histórico", "Cost without history", ' class="num"'), ("Nota", "Note", ""))) + "</tr>")
     rec = "".join(f'<div class="panel" lang="{"pt" if lang == "Recomendação" else "en"}"><h3>{esc(lang)}</h3><ul>'
                   + "".join(f"<li>{_md(i)}</li>" for i in plan[lang]) + "</ul></div>"
-                  for lang in ("Recomendação", "Recommendation") if plan.get(lang))
+                  for lang in (("Recomendação",) if page_lang == "pt" else ("Recomendação", "Recommendation"))
+                  if plan.get(lang))
     src = _bi(f"Modelos lite: execução <code>{esc(lite_run.name)}</code> (treino mais longo).",
               f"Lite models: run <code>{esc(lite_run.name)}</code> (longer training).") if lite_run else ""
     return ('<section id="choice"><h2>Qual modelo comparar com a baseline<span class="en h2en">Which model to compare '
@@ -1172,7 +1212,8 @@ def _choice_section(run: Path, df: pd.DataFrame, extra_runs: list[Path], notes: 
 
 def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None = None,
                notes: Path | None = None, roadmap: Path | None = None, summary: Path | None = None,
-               choice: Path | None = None) -> Path:
+               choice: Path | None = None, lang: str = "en", authors: list[str] | None = None,
+               affiliation: str | None = None) -> Path:
     """``runs[0]`` is the run shown; ablation summaries, benchmarks and the demo
     video are read from ``<results>/ablation_*``, ``<results>/benchmarks`` and
     ``<results>/demo`` next to it (``extra`` is reserved for further report files)."""
@@ -1194,6 +1235,8 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
         commit = "unknown"
     notes_path = notes or PROJECT_ROOT / "docs" / "PILOT_FINDINGS.md"
     roadmap_path = roadmap or PROJECT_ROOT / "docs" / "ROADMAP.md"
+    if lang == "pt" and roadmap is None and (PROJECT_ROOT / "docs" / "ROADMAP.pt.md").exists():
+        roadmap_path = PROJECT_ROOT / "docs" / "ROADMAP.pt.md"
     efficiency = _read(run / "report" / "efficiency.csv")
     present = set(df["variant"])
     s = []
@@ -1204,7 +1247,10 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
     if duration:
         chips.append(f"GPU time {duration}")
     s.append(f'<header class="top"><div class="eyebrow">TAC-UFLD v{__version__} · {esc(run.name)}</div>'
-             f'<h1>{esc(title)}</h1><p class="lede">Can a lightweight lane detector that looks at the previous '
+             f'<h1>{esc(title)}</h1>'
+             + (f'<p class="authors"><span class="k">Authors:</span> {esc(", ".join(authors))}'
+                + (f' · {esc(affiliation)}' if affiliation else "") + "</p>" if authors else "")
+             + '<p class="lede">Can a lightweight lane detector that looks at the previous '
              'frames beat the single-frame UFLD baseline? UFLD (ResNet-18) and a small CNN, each with temporal '
              'variants, trained on the ELAS ego-lane dataset and tested on three road scenes never used for training '
              'or model selection.</p><div class="meta">'
@@ -1212,15 +1258,17 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
              + '<span class="chip warn">indicative pilot, not the full protocol</span></div></header>')
 
     # one-screen overview (key figures, four charts, challenges, next steps)
-    s.append(_summary_section(run, df, runs[1:], summary or PROJECT_ROOT / "docs" / "RESEARCH_SUMMARY.md"))
+    s.append(_summary_section(run, df, runs[1:], summary or PROJECT_ROOT / "docs" / "RESEARCH_SUMMARY.md", lang))
     # which model to compare with the baseline (Portuguese first)
-    s.append(_choice_section(run, df, runs[1:], choice or PROJECT_ROOT / "docs" / "MODEL_CHOICE.md"))
+    s.append(_choice_section(run, df, runs[1:], choice or PROJECT_ROOT / "docs" / "MODEL_CHOICE.md", lang))
 
     # findings (hand-written analysis)
     # (a Portuguese version next to the notes, ``<notes>.pt.md``, is shown first)
     if notes_path.exists():
         versions = [("pt", "O que os resultados mostram", notes_path.with_name(notes_path.stem + ".pt.md")),
                     ("en", "What the results show", notes_path)]
+        if lang == "pt":
+            versions = versions[:1]
         blocks = []
         for lang, heading, path in versions:
             if path.exists():
@@ -1423,10 +1471,17 @@ def build_site(runs: list[Path], out: Path, title: str, extra: list[Path] | None
 
     body = f'<main class="wrap">{"".join(x for x in s if x)}</main>'
     page_title = "TAC-UFLD Pilot Results"
+    html_lang = "en"
+    if lang == "pt":
+        from tac_ufld.site_i18n import translate_html
+
+        body, untranslated = translate_html(body)
+        page_title, html_lang = "Resultados TAC-UFLD", "pt-BR"
+        (out / "untranslated.txt").write_text(chr(10).join(dict.fromkeys(untranslated)), encoding="utf-8")
     head = f"<title>{page_title}</title>{FONTS}<style>{CSS}</style>"
     (out / "page.html").write_text(head + body, encoding="utf-8")
     (out / "index.html").write_text(
-        f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
+        f'<!doctype html><html lang="{html_lang}"><head><meta charset="utf-8"><meta name="viewport" '
         f'content="width=device-width, initial-scale=1, viewport-fit=cover">{head}</head><body>{body}</body></html>',
         encoding="utf-8")
     (out / ".nojekyll").write_text("", encoding="utf-8")
