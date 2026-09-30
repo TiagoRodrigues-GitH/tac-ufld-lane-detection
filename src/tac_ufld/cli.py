@@ -1,4 +1,49 @@
-"""Command-line interface.
+"""Command-line interface (``python -m tac_ufld ...``): the training entry point.
+
+=============================================================================
+HOW TO SWITCH DATASETS  (elas | culane | tusimple | openlane)
+=============================================================================
+The training code is the same for every dataset. A dataset is selected in
+ONE place, ``--dataset <name>``, and everything specific to it lives in two
+files: its adapter (``tac_ufld/data/<name>.py``: reading, lane slots, splits,
+native metric) and its config (``configs/<name>.yaml``: image size, row
+anchors, grid, lanes, temporal step, recipe). ELAS stays the default.
+
+1. Download: see docs/DATASET_DOWNLOAD_GUIDE.md (links, files, sizes).
+2. Expected folders (the adapter also finds them one level down):
+     CULane    driver_*_{30,90}frame/  laneseg_label_w16/  list/{train_gt,val_gt,test}.txt
+     TuSimple  train_set/{clips/, label_data_*.json}  test_set/clips/  test_label.json
+     OpenLane  images/{training,validation}/  lane3d_1000/{training,validation,test}/
+     ELAS      <scene>/{config.xml, groundtruth.xml, images/images/*.png}
+3. Check the download (plain Python, reads only):
+     python scripts/check_dataset.py culane D:\\datasets\\CULane
+4. Point the code at it: set the root variable, then enable the dataset in
+   configs/datasets.yaml (``enabled: true``). The only personal paths are
+   those roots (no other file holds a path):
+     $env:CULANE_ROOT = "D:\\datasets\\CULane"      # or TUSIMPLE_ROOT / OPENLANE_ROOT / ELAS_ROOT
+5. Check it with the project's own reader (counts, lane order, history
+   frames, overlays in results/validate_<name>/):
+     python -m tac_ufld validate-dataset --dataset culane
+6. Smoke test (a few batches through every stage, minutes):
+     python scripts/smoke_datasets.py --datasets culane
+7. Full training (days; asks for --confirm):
+     python -m tac_ufld run --dataset culane --confirm
+   Interrupted? Run the same command with --resume: finished models are
+   reused and an unfinished one continues from its last epoch.
+8. Before training, look at: results/validate_<name>/overlays (the dots must
+   sit on the lane markings), the history-frame availability in its report,
+   and the dataset's config (epochs, batch size, variants to train).
+
+Outputs: results/<config name>/seed_<k>/checkpoints/<variant>.pt, so the
+dataset (config name) and model variant are part of every checkpoint path;
+the checkpoint card also records the dataset. Metrics are kept apart: the
+internal metrics (lane_f1_iou50, pixel_f1 = the original script's
+polyline_pixel_f1, anchor_f1, jitter) are the same for every dataset; the
+dataset's official metric is reported as native_* (CULane F1@IoU0.5,
+TuSimple accuracy/FP/FN, OpenLane F1) in separate log lines, columns and
+report tables. Seeds: train.seeds; the data split never depends on them.
+Details: docs/DATASETS.md.
+=============================================================================
 
 Experiments (ELAS is the default dataset)::
 

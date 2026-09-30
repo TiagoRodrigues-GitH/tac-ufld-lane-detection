@@ -133,12 +133,14 @@ On ELAS both ego lanes are annotated in essentially every frame and every model 
 
 `configs/datasets.yaml` enables datasets individually (only ELAS by default); disabled datasets are never scanned, and an enabled dataset with a missing root is an explicit error. Details, formats, validation findings and per-dataset protocols: [docs/DATASETS.md](docs/DATASETS.md).
 
+Switching datasets is one flag, `--dataset <name>`. The step-by-step guide is the "HOW TO SWITCH DATASETS" block at the top of `src/tac_ufld/cli.py`, also printed by `python -m tac_ufld --help`. [docs/DATASET_DOWNLOAD_GUIDE.md](docs/DATASET_DOWNLOAD_GUIDE.md) is for whoever downloads the data. `python scripts/check_dataset.py <dataset> <root>` checks a download with plain Python, and `python scripts/smoke_datasets.py` runs every stage on every dataset for a few batches, using a synthetic copy of the layout when the data is absent.
+
 | Dataset | Adapter status |
 |---|---|
 | ELAS | validated on real data |
-| CULane | synthetic layout tests; real-data check: `validate-dataset --dataset culane` |
-| TuSimple | new; synthetic layout tests |
-| OpenLane (2D) | new; synthetic layout tests |
+| CULane | synthetic layout tests + end-to-end smoke test on a synthetic copy; not yet run on real CULane |
+| TuSimple | synthetic layout tests + end-to-end smoke test on a synthetic copy; not yet run on real TuSimple |
+| OpenLane (2D) | synthetic layout tests + end-to-end smoke test on a synthetic copy; not yet run on real OpenLane |
 
 ## Streaming and deployment
 
@@ -192,8 +194,10 @@ src/tac_ufld/
 ├── deploy/      ONNX export, ONNX Runtime, TensorRT, FP16/INT8, checks
 ├── ui/          Streamlit app (core.py is testable without Streamlit)
 ├── visualization/, reporting.py, experiment.py, ablation.py, sanity.py, site.py, package.py, doctor.py, sim/
-configs/         elas{,_smoke,_pilot}.yaml, culane/tusimple/openlane.yaml, datasets.yaml, ablations/, deploy/
-scripts/jetson/  engine build and on-device measurement
+configs/         elas{,_smoke,_pilot,_pilot_v2,_lite_long}.yaml, {culane,tusimple,openlane}{,_smoke}.yaml,
+                 datasets.yaml, ablations/, deploy/
+scripts/         check_dataset.py (download check), smoke_datasets.py (every dataset, every stage),
+                 publish_pages.sh, jetson/ (engine build and on-device measurement)
 tests/           unit, integration, fixtures of the CULane/TuSimple/OpenLane layouts
 docs/            hand-off, audits, datasets, deployment, Docker, experiment matrix, testing, pilot findings
 reference/       the original ELAS script, unchanged
@@ -217,6 +221,7 @@ Commands, results and skip reasons: [docs/TESTING.md](docs/TESTING.md).
 | [PILOT_FINDINGS.md](docs/PILOT_FINDINGS.md) | what the GPU pilot shows |
 | [EXPERIMENT_MATRIX.md](docs/EXPERIMENT_MATRIX.md) | every experiment with command and time budget |
 | [DATASETS.md](docs/DATASETS.md) | registry, adapters, protocols, validation |
+| [DATASET_DOWNLOAD_GUIDE.md](docs/DATASET_DOWNLOAD_GUIDE.md) | for the person downloading CULane / TuSimple / OpenLane: links, files, sizes, folder trees, check |
 | [PREPROCESSING_AUGMENTATION.md](docs/PREPROCESSING_AUGMENTATION.md) | input ablations, augmentation, training controls, ablation runner |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | streaming, ONNX, TensorRT, INT8, Jetson, budget simulation, CARLA |
 | [DOCKER.md](docs/DOCKER.md) | images, Compose, GPU on Linux / WSL 2 |

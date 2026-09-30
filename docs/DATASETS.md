@@ -9,7 +9,7 @@ Four datasets share one internal representation (`FrameRecord`: lanes in origina
 | TuSimple | 4 | tested on a synthetic copy; **not run on real TuSimple** | official train (validation carved from it) / official `test_label.json` | official `LaneEval` accuracy, FP, FN (+ F1 of 1−FP, 1−FN) |
 | OpenLane (2D) | 4 | tested on a synthetic copy; **not run on real OpenLane** | official `training` (validation = held-out segments) / official `validation` as test | CULane-style F1 @ IoU 0.5, 30 px at 1920×1280, all lanes |
 
-No CULane, TuSimple or OpenLane copy was available on the development machine. Their adapters are checked against fixtures that reproduce the published folder structure, list/JSON formats, image sizes and frame-id conventions (`tests/dataset_fixtures.py`). **Run `validate-dataset` on the real data before training** (below).
+No CULane, TuSimple or OpenLane copy was available on the development machine. Their adapters are checked against fixtures that reproduce the published folder structure, list/JSON formats, image sizes and frame-id conventions (`tests/dataset_fixtures.py`). Since v0.4, every stage also runs end to end on those synthetic copies, at each dataset's real geometry and with its native metric (`scripts/smoke_datasets.py`, `tests/test_dataset_tools.py`). **Run `scripts/check_dataset.py` and `validate-dataset` on the real data before training** (below).
 
 ## Selecting datasets: `configs/datasets.yaml`
 
@@ -42,6 +42,24 @@ python -m tac_ufld run --all-datasets --smoke    # every enabled dataset, each w
 ## Real-data validation: `validate-dataset`
 
 `python -m tac_ufld validate-dataset --dataset <name> [--root <path>]` (allowed on a disabled dataset when `--root` is given) writes `results/validate_<name>/validation_report.json` and overlays. It checks, per split: frame and sequence counts; image sizes of a sample against the declared size; lane points inside the image; slot occupancy; **left-to-right order of the slots** at their lowest shared row; availability of history frames *inside* sequences for the configured `temporal_step`; duplicate keys; adapter statistics (missing images, skipped lanes, slot/flag mismatches). CULane additionally reports the stored-frame stride of every clip. The overlays draw each slot in its own colour, every annotated lane in grey and the encoded row-anchor targets as dots: the dots must sit on the markings.
+
+## Download, check, smoke test
+
+* **Download**: `docs/DATASET_DOWNLOAD_GUIDE.md`, written for whoever downloads the data. It gives the links, which archives to take, their sizes and the expected folder trees.
+* **Check a download** with plain Python; the check only reads files: `python scripts/check_dataset.py <dataset> <root>`. It reports file counts per split against the published counts, the annotation files, a sample of image/label pairs (plus history frames) and the image size, then gives a READY / NOT READY verdict.
+* **Smoke test** every stage on every dataset, a few batches each: `python scripts/smoke_datasets.py`. When a dataset's root is set, it uses the real data with `configs/<dataset>_smoke.yaml`; otherwise it uses a synthetic copy of the dataset's layout. Output goes to `results/smoke_datasets/`.
+* **Step by step**: see "HOW TO SWITCH DATASETS" at the top of `src/tac_ufld/cli.py`, also printed by `python -m tac_ufld --help`.
+
+## Temporal sampling per dataset: what is and is not possible
+
+History frame `k` of a sample is `frame_id − k · temporal_step`. When that frame doesn't exist (a sequence start, or a frame the dataset doesn't store), the nearest newer available frame is repeated. This never fails silently: the count is logged, a warning appears above 5 %, and `validate-dataset` reports the availability.
+
+| Dataset | What is stored and annotated | History in the config | Possible | Not possible |
+|---|---|---|---|---|
+| ELAS | Continuous scene videos; every frame is stored and annotated | `temporal_step: 2`, 3 frames | Any step and window length (the history ablation grid covers steps 1–15 and 2–5 frames); recurrent state carried over a whole scene; jitter between consecutive annotated frames | Nothing specific; the limits are the small size (10 scenes in the pilots) and 2 ego lanes only |
+| CULane | Clips store only every 30th (`*_30frame`) or 90th (`*_90frame`) video frame; every stored frame is annotated | `temporal_step: 90` (3 s at 30 fps; present in both folder types) | History 1 s apart in the 30-frame drivers or 3 s apart in all of them; carried state along the stored frames | Short-range history (< 1 s) does not exist. With step 30, the 90-frame drivers have no history. Jitter compares frames 1–3 s apart, so it measures less than on continuous video |
+| TuSimple | 1-s clips of 20 consecutive frames (20 fps); only frame 20 is annotated | `temporal_step: 2` (frames 20, 18, 16) | Up to 19 history frames per sample, with any step 1–9 for 3 frames; unannotated history is fine as input | No annotated consecutive frames, so no jitter and no evaluation with state carried across frames; memory spans at most 1 s |
+| OpenLane (2D) | Waymo segments at 10 Hz; annotated frames along each segment | `temporal_step: 1` (0.1 s) | Any step and window length; state carried over a segment; jitter | 3D lanes are not used by this 2D pipeline |
 
 ## ELAS (reference dataset)
 

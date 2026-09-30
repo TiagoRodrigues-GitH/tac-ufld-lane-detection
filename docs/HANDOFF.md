@@ -29,7 +29,16 @@ tensorboard --logdir results/elas_full/tensorboard
 # after the run
 python -m tac_ufld site --runs results/elas_full --title "TAC-UFLD full results"
 python -m tac_ufld ui
+
+# another dataset (CULane shown; tusimple / openlane are the same). Download first: docs/DATASET_DOWNLOAD_GUIDE.md
+python scripts/check_dataset.py culane D:\datasets\CULane                # plain Python: READY / NOT READY
+$env:CULANE_ROOT = "D:\datasets\CULane"                                 # then enabled: true in configs/datasets.yaml
+python -m tac_ufld validate-dataset --dataset culane                    # counts, lane order, history, overlays
+python scripts/smoke_datasets.py --datasets culane --device cuda        # a few batches through every stage
+python -m tac_ufld run --dataset culane --confirm                       # the full run (--resume after interruptions)
 ```
+
+Switching datasets is only `--dataset`; the "HOW TO SWITCH DATASETS" block at the top of `src/tac_ufld/cli.py` (also `python -m tac_ufld --help`) explains each step. The CULane and TuSimple configs use the official UFLD training augmentation (rotation ±6°, ±100 px vertical and ±200 px horizontal shifts) plus current-frame degradation; OpenLane uses the ELAS recipe (no official UFLD setting).
 
 `--confirm` is required for the full configs (a run without it stops before creating anything). `--resume` continues an interrupted variant from its last epoch and reuses finished HPO studies and seeds. The run writes `results/elas_full/report/REPORT.md` (with the protocol actually used and every setting that differs from the defaults), `results.xlsx`, figures, per-frame CSVs, overlays and a test video. With 12 models, geometric augmentation (the lite models need most of the 50 epochs) and HPO, expect about 4 to 5 days on an RTX 3050 and roughly a day on a GPU four to five times faster (`docs/EXPERIMENT_MATRIX.md`). The core subset above saves about a quarter.
 
@@ -67,6 +76,8 @@ ELAS geometry (real-data regression test), missing/unknown slots, ROI ignore row
 * New models: `ufld_v06` (aligned fusion), `ufld_v07` and `lite_v06` (ConvGRU; start exactly as their baseline; carried-state streaming mode), equal-training controls `ufld_baseline_ct` / `lite_baseline_ct`, all paired in the report.
 * Evaluation: validation-tuned output Kalman tracker for every model, per-condition F1 table, carried-state results; ablation specs with grids, explicit `allow` lists, shared `common` settings and reuse of identical baseline checkpoints (`configs/ablations/history.yaml`).
 * Results page: model explanations and differences, overfitting and history ablations, roadmap (`docs/ROADMAP.md`).
+* Robustness evaluation (`python -m tac_ufld robustness --runs <run>`): every checkpoint re-evaluated on the held-out scenes with the current frame occluded / blurred / darkened / noisy and the history clean (fixed per-frame corruptions, identical for every model).
+* Multi-dataset preparation: `scripts/check_dataset.py` (download check, plain Python), `scripts/smoke_datasets.py` with `configs/{culane,tusimple,openlane}_smoke.yaml` (every stage, a few batches, synthetic copy when the data is absent), `docs/DATASET_DOWNLOAD_GUIDE.md` for whoever downloads the data, internal and native metrics on separate log lines.
 
 ### Newly implemented but not validated
 * CULane, TuSimple and OpenLane on **real data** (no copy was available): run `python -m tac_ufld validate-dataset --dataset <name>` first. OpenLane's native metric settings follow our reading of the official 2D evaluation, not cross-checked.
