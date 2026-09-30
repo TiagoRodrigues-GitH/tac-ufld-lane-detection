@@ -1,6 +1,8 @@
-# TAC-UFLD v0.3 — hand-off for the full experiment
+# TAC-UFLD v0.4 — hand-off for the full experiment
 
-**For:** the supervisor running the full experiment. **From:** Tiago Rodrigues. **Date:** 2026-09-29. **Package:** `tac-ufld-handoff-v0.3.0-<date>.zip` (git branch `handoff/v0.3`).
+**For:** the supervisor running the full experiment. **From:** Tiago Rodrigues. **Date:** 2026-09-30. **Package:** `tac-ufld-handoff-v0.4.0-<date>.zip` (git branch `handoff/v0.4`; v0.3 is on `handoff/v0.3`).
+
+**What changed in v0.4, in one paragraph.** The first pilot showed UFLD overfitting after one epoch (held-out lane F1 0.05) and temporal models that barely used their history. An augmentation ablation, decided on validation, found the cause: without geometric augmentation UFLD memorises lane positions; with it the UFLD baseline reaches 0.86 to 0.88 held-out lane F1. `configs/elas.yaml` now uses that recipe (plus current-frame degradation) for every model. v0.4 also adds two temporal models (aligned fusion, ConvGRU), controls for extra training (`*_baseline_ct`) and for extra layers (`lite_v05_static`), a Kalman-tracker reference, per-condition results and a history-length ablation. Findings so far: `docs/PILOT_V2_FINDINGS.md`; details: `docs/TEMPORAL_IMPROVEMENTS.md`; plan: `docs/ROADMAP.md`.
 
 ## 1. What to run
 
@@ -17,9 +19,11 @@ python -m pytest -q                                                     # ~10 mi
 python -m tac_ufld sanity --config configs/elas.yaml --real             # shapes, losses, gradients, warm starts
 python -m tac_ufld check-data --config configs/elas.yaml                # splits, leakage, label overlays
 
-# the full experiment (6 variants x 6 seeds, HPO with equal budgets, <= 50 epochs)
+# the full experiment (12 models and controls x 6 seeds, HPO with equal budgets, <= 50 epochs)
 python -m tac_ufld run --config configs/elas.yaml --confirm
 python -m tac_ufld run --config configs/elas.yaml --confirm --resume    # after any interruption
+# or the core subset (9 models; about 25 % shorter)
+python -m tac_ufld run --config configs/elas.yaml --confirm --variants ufld_baseline ufld_baseline_ct ufld_v03 ufld_v07 lite_baseline lite_baseline_ct lite_v05 lite_v05_static lite_v06
 tensorboard --logdir results/elas_full/tensorboard
 
 # after the run
@@ -27,9 +31,11 @@ python -m tac_ufld site --runs results/elas_full --title "TAC-UFLD full results"
 python -m tac_ufld ui
 ```
 
-`--confirm` is required for the full configs (a run without it stops before creating anything). `--resume` continues an interrupted variant from its last epoch and reuses finished HPO studies and seeds. The run writes `results/elas_full/report/REPORT.md` (with the protocol actually used and every setting that differs from the defaults), `results.xlsx`, figures, per-frame CSVs, overlays and a test video. Expect ≈ 1.5–2 days on an RTX 3050 (`docs/EXPERIMENT_MATRIX.md`).
+`--confirm` is required for the full configs (a run without it stops before creating anything). `--resume` continues an interrupted variant from its last epoch and reuses finished HPO studies and seeds. The run writes `results/elas_full/report/REPORT.md` (with the protocol actually used and every setting that differs from the defaults), `results.xlsx`, figures, per-frame CSVs, overlays and a test video. With 12 models, geometric augmentation (the lite models need most of the 50 epochs) and HPO, expect about 4 to 5 days on an RTX 3050 and roughly a day on a GPU four to five times faster (`docs/EXPERIMENT_MATRIX.md`). The core subset above saves about a quarter.
 
-## 2. Protocol (unchanged from v0.2)
+## 2. Protocol (unchanged from v0.2; recipe changed in v0.4)
+
+The v0.4 training recipe for every model: photometric augmentation as before, plus geometric augmentation (shift, zoom, rotation, perspective, crop; one homography per clip, labels re-encoded exactly) and current-frame degradation (30 % of clips). Delete the `geometric` block and `current_frame_prob` in `configs/elas.yaml` to reproduce the v0.3 recipe. New pairs in the statistics: every temporal model is also compared with `*_baseline_ct` (same extra training), `lite_v05` with `lite_v05_static` (same layers, no time), and every model with its own output filtered by the Kalman tracker.
 
 Held-out test scenes `BR_S02`, `VIX_S05`, `VV_S03` (never seen by training, validation or HPO); train/val/seen-scene test from 60-frame blocks of the other seven scenes with a ≥ 10-frame purge gap; split independent of the training seed and leakage-checked before training; 6 seeds; fresh seeded Optuna studies with the same budget for every model including the baselines; checkpoint selection, early stopping, HPO and post-processing tuning on validation `lane_f1_iou50` only; test evaluated once; paired Wilcoxon + Holm against the same-family baseline (`ufld_v02/v03/v04` vs `ufld_baseline`, `lite_v05` vs `lite_baseline`). Primary metric `lane_f1_iou50`; secondary `lane_f1_iou35`; also precision, recall, F2, TP/FP/FN, pixel F1, anchor F1, jitter, efficiency.
 

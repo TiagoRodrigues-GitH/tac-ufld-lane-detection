@@ -46,6 +46,19 @@ data:
     erasing_prob: 0.15
     erasing_scale: [0.02, 0.08]
     frame_dropout_prob: 0.10
+    # v0.4 recipe, chosen on VALIDATION in configs/ablations/augmentation.yaml
+    # (UFLD baseline best val lane F1 0.161 -> 0.772; docs/PILOT_V2_FINDINGS.md).
+    # Remove this block to reproduce the v0.3 protocol.
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale: [0.9, 1.1]
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale: [0.85, 1.0]
+    current_frame_prob: 0.3     # degrade only the current frame of 30 % of clips (history stays clean)
   split:
     split_seed: 2026            # fixed; never tied to the training seed
     test_scenes: [BR_S02, VIX_S05, VV_S03]   # held out entirely (unseen roads)
@@ -59,7 +72,11 @@ data:
     max_seen_test_frames: null
 
 model:
-  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04, lite_baseline, lite_v05]
+  # Every model and control of v0.4 (docs/TEMPORAL_IMPROVEMENTS.md). A shorter
+  # "core" run: --variants ufld_baseline ufld_baseline_ct ufld_v03 ufld_v07
+  #   lite_baseline lite_baseline_ct lite_v05 lite_v05_static lite_v06
+  variants: [ufld_baseline, ufld_baseline_ct, ufld_v02, ufld_v03, ufld_v04, ufld_v06, ufld_v07,
+             lite_baseline, lite_baseline_ct, lite_v05, lite_v05_static, lite_v06]
   backbone: "18"
   pretrained: true              # ImageNet weights, as in the UFLD paper
   v04_warm_start: baseline      # "v02" = supervisor's protocol (confounds epochs)
