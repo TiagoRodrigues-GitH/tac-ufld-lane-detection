@@ -2,6 +2,7 @@
 # Runs detached; progress in results/openlane_pilot/run.log, console output in
 # results/openlane_pilot_{run,robustness}.{out,err}.log. Start it with:
 #   Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\run_openlane_pilot.ps1' -WindowStyle Minimized
+param([switch]$Resume)   # -Resume: continue an interrupted run (finished models are reused)
 $ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
@@ -22,5 +23,7 @@ function Step([string]$name, [string[]]$arguments) {
   "[{0}] {1} exit code {2}" -f (Get-Date -Format s), $name, $p.ExitCode | Out-File $status -Append -Encoding utf8
 }
 
-Step "run" @("-m", "tac_ufld", "run", "--config", "configs/openlane_pilot.yaml")
+$runArgs = @("-m", "tac_ufld", "run", "--config", "configs/openlane_pilot.yaml")
+if ($Resume) { $runArgs += "--resume" }
+Step "run" $runArgs
 Step "robustness" @("-m", "tac_ufld", "robustness", "--runs", "results/openlane_pilot")
