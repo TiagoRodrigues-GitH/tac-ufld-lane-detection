@@ -191,6 +191,14 @@ class DataConfig:
     normalize: str = "imagenet"
     include_frames_without_lanes: bool = False
     num_workers: int = 2
+    # Decode JPEGs at a reduced DCT scale (1/2, 1/4, 1/8) no smaller than the network
+    # input, then resize. Off by default (ELAS results used full decodes); meant for
+    # large sources such as OpenLane 1920x1280 -> 480x320, where decoding dominates.
+    jpeg_draft: bool = False
+    # OpenLane: drop frames whose visible lanes all have attribute 0 (no ego-relative
+    # position annotated, mostly curbs or unlabelled frames), so the slot targets never
+    # say "no lane" where a lane is visible. History frames are still read from disk.
+    skip_unattributed_frames: bool = False
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     preprocessing: PreprocessConfig = field(default_factory=PreprocessConfig)
     split: SplitConfig = field(default_factory=SplitConfig)

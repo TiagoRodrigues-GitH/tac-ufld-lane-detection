@@ -20,10 +20,14 @@ _RGB2YIQ = torch.tensor([[0.299, 0.587, 0.114], [0.596, -0.274, -0.322], [0.211,
 _YIQ2RGB = torch.linalg.inv(_RGB2YIQ)
 
 
-def load_frame(path: str, img_w: int, img_h: int) -> torch.Tensor:
+def load_frame(path: str, img_w: int, img_h: int, draft: bool = False) -> torch.Tensor:
     """RGB image resized to (img_h, img_w), float32 in [0, 1], CHW.
-    PIL handles non-ASCII Windows paths (cv2.imread does not)."""
+    PIL handles non-ASCII Windows paths (cv2.imread does not).
+    ``draft``: JPEG only, decode at the smallest DCT scale that is still >= the
+    target size (much faster for large sources), then resize as usual."""
     with Image.open(path) as img:
+        if draft and img.format == "JPEG":
+            img.draft("RGB", (img_w, img_h))
         img = img.convert("RGB").resize((img_w, img_h), resample=Image.BILINEAR)
         arr = np.asarray(img, dtype=np.float32) / 255.0
     return torch.from_numpy(arr.transpose(2, 0, 1).copy())

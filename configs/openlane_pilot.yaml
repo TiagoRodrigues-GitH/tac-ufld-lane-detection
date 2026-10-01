@@ -28,6 +28,8 @@ data:
   num_frames: 3
   temporal_step: 1                 # DATASET-SPECIFIC: 10 Hz, history = t-0.1 s, t-0.2 s (as configs/openlane.yaml)
   num_workers: 6                   # 1920x1280 JPEG decoding is the bottleneck (8 CPU cores)
+  jpeg_draft: true                 # decode at 1/4 scale (exactly 480x320), see DataConfig.jpeg_draft
+  skip_unattributed_frames: true   # DATASET-SPECIFIC: ~1/3 of frames have only attribute-0 lanes (no slot labels)
   augmentation:
     # No official UFLD setting for OpenLane: the recipe chosen on ELAS
     # validation (configs/elas.yaml, v0.4).
@@ -48,7 +50,7 @@ data:
     val_fraction: 0.15
     seen_test_fraction: 0.0
     cap_by_sequence: true          # val/test caps keep whole segments (jitter, Kalman, carried state)
-    max_train_frames: 4000         # random frames; history frames are still read from disk
+    max_train_frames: 6000         # random frames (about all of images_training_0 after the attribute filter); history from disk
     max_val_frames: 1000
     max_test_frames: 3000
 

@@ -106,7 +106,7 @@ class TemporalLaneDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         cfg = self.cfg
         paths = self.context_paths[idx][-1:] if self.static_history else self.context_paths[idx]
-        frames = torch.stack([load_frame(p, cfg.img_w, cfg.img_h) for p in paths])
+        frames = torch.stack([load_frame(p, cfg.img_w, cfg.img_h, cfg.jpeg_draft) for p in paths])
         if self.eval_ops is not None:
             rng = random.Random(f"{self.eval_degradation_seed}:{idx}")
             op = rng.choice(list(cfg.augmentation.current_frame_ops))

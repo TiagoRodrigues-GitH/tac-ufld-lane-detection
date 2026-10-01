@@ -36,7 +36,8 @@ def build_adapter(cfg: "ExperimentConfig") -> LaneDatasetAdapter:
     if name == "openlane":
         from tac_ufld.data.openlane import OpenLaneAdapter
 
-        return OpenLaneAdapter(root, segments=cfg.data.scenes or None)
+        return OpenLaneAdapter(root, segments=cfg.data.scenes or None,
+                               skip_unattributed_frames=cfg.data.skip_unattributed_frames)
     raise ValueError(f"dataset '{cfg.data.dataset}' has no adapter (supported: {list(KNOWN_DATASETS)})")
 
 

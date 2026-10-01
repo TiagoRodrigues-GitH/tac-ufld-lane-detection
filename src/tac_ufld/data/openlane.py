@@ -120,8 +120,9 @@ class OpenLaneAdapter(LaneDatasetAdapter):
     }
 
     def __init__(self, root: str | Path, segments: list[str] | None = None,
-                 annotation_dir: str | None = None) -> None:
+                 annotation_dir: str | None = None, skip_unattributed_frames: bool = False) -> None:
         self.root = Path(root)
+        self.skip_unattributed_frames = skip_unattributed_frames
         if not self.root.is_dir():
             raise FileNotFoundError(f"OpenLane root not found: {self.root}")
         self.ann_root = self._find_annotations(annotation_dir)
@@ -206,6 +207,9 @@ class OpenLaneAdapter(LaneDatasetAdapter):
                     all_lanes.append(pts)
                     parsed.append((int(lane.get("attribute", 0)), pts))
                 slots, duplicates = attribute_slots(parsed, self.num_lanes)
+                if self.skip_unattributed_frames and all_lanes and all(s is None for s in slots):
+                    stats["skipped_unattributed"] += 1   # lanes visible, none with an ego-relative attribute
+                    continue
                 stats["lanes"] += len(all_lanes)
                 stats["lanes_attribute0"] += sum(a == 0 for a, _ in parsed)
                 stats["duplicate_attribute"] += duplicates

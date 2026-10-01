@@ -48,7 +48,7 @@ def carry_predictions(model: nn.Module, dataset: TemporalLaneDataset, adapter, d
         states: dict[int, torch.Tensor] = {}
         for start in range(0, len(frame_ids), batch_size):
             chunk = frame_ids[start:start + batch_size]
-            frames = torch.stack([load_frame(str(adapter.frame_path(seq, f)), cfg.img_w, cfg.img_h) for f in chunk])
+            frames = torch.stack([load_frame(str(adapter.frame_path(seq, f)), cfg.img_w, cfg.img_h, cfg.jpeg_draft) for f in chunk])
             images = normalize_channels(dataset.preprocessor(frames), dataset.mean, dataset.std).to(device)
             with autocast:
                 feats = model.encode_frames(images)["current"]
