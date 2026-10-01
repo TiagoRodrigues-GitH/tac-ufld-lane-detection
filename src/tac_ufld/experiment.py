@@ -431,6 +431,9 @@ class ExperimentRunner:
         # capacity control: the same temporal model fed the current frame only
         pairs += [(v, resolve_spec(v, cfg).static_reference) for v in self.variants
                   if resolve_spec(v, cfg).static_reference in self.variants]
+        # declared primary comparisons (may cross families, e.g. lite vs UFLD)
+        primary = [tuple(p) for p in cfg.evaluation.primary_pairs if all(v in self.variants for v in p)]
+        pairs += [p for p in primary if p not in pairs]
         sheets, md = {}, [f"# Experiment report: {cfg.name}\n",
                           f"Config hash `{cfg.config_hash()}`, package {__version__}, seeds {self.seeds}, "
                           f"device {self.device}.\n",
@@ -467,12 +470,15 @@ class ExperimentRunner:
                     plots.plot_error_counts(sub, tag, self.labels, rep / "test_error_counts")
                     plots.plot_efficiency(efficiency, sub, f"lane_f1_{tag}", self.labels, rep / "efficiency")
                     higher = {f"lane_f1_{tag}": True, f"lane_f2_{tag}": True, "pixel_f1": True, "jitter_px": False}
-                    paired = paired_comparisons(sub, pairs, higher)
+                    paired = paired_comparisons(sub, pairs, higher, primary_pairs=primary,
+                                                primary_metric=f"lane_f1_{tag}")
                     paired.to_csv(rep / "paired_tests_test_tuned.csv", index=False)
                     sheets["paired_tests"] = paired
                     md += ["\n## Paired comparisons vs same-family single-frame reference (test, tuned)\n",
-                           "Exact two-sided Wilcoxon over seeds, Holm-adjusted. `underpowered` = "
-                           "the seed count cannot reach p < 0.05. Rows paired with `*_baseline_ct` compare with "
+                           "Exact two-sided Wilcoxon over seeds, Holm-adjusted within families: `primary` = the "
+                           "comparisons declared in `evaluation.primary_pairs` on the primary metric, "
+                           "`exploratory:<metric>` = every other row of that metric. `underpowered` = even "
+                           "unanimous seeds cannot reach p < 0.05 in this family. Rows paired with `*_baseline_ct` compare with "
                            "the baseline that received the same extra training (equal-training control).\n",
                            markdown_table(paired.round(4)) if not paired.empty else "_(no pairs)_\n"]
         md += self._temporal_sections(results, rep, sheets)

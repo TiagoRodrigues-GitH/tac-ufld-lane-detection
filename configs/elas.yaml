@@ -83,7 +83,8 @@ model:
   lite_history_encoder: shared  # "tiny" = cheaper history encoder
 
 train:
-  seeds: [1, 2, 3, 4, 5, 6]     # >= 6 needed for p < 0.05 with paired Wilcoxon
+  seeds: [1, 2, 3, 4, 5, 6, 7, 8]   # 2 declared primary comparisons (Holm) need >= 7 paired seeds;
+                                 # 8 lets one seed disagree (tac_ufld.evaluation.stats.seeds_needed)
   epochs: 50
   batch_size: 8
   optimizer: adam               # official UFLD TuSimple recipe: Adam 4e-4, cosine, warm-up
@@ -122,6 +123,9 @@ hpo:
     lambda_coord: {low: 0.05, high: 0.8, variants: [ufld_v04]}
 
 evaluation:
+  # Declared before the run (docs/MODEL_CHOICE.md): the paper's primary tests, one Holm family on clean
+  # test lane F1 and on occluded-frame lane F1 (robustness). Change them BEFORE running, never after.
+  primary_pairs: [[ufld_v03, ufld_baseline], [lite_v05, lite_v05_static]]
   iou_thresholds: [0.5, 0.35]   # first = primary (CULane)
   culane_line_width: 30
   culane_image_width: 1640

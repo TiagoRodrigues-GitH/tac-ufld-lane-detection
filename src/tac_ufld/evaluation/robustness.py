@@ -84,4 +84,29 @@ def evaluate_run(run: Path, device: str, seed: int = 2026, batch_size: int = 8, 
                     n_seeds=("seed", "nunique"), frames=("frames", "first")).reset_index())
     summary["drop_vs_clean"] = summary["lane_f1"] - summary["clean_lane_f1"]
     summary.to_csv(out / "robustness_summary.csv", index=False)
+    _paired(df, cfg).to_csv(out / "robustness_paired_tests.csv", index=False)
     return summary
+
+
+def _paired(df: pd.DataFrame, cfg) -> pd.DataFrame:
+    """Same-seed paired tests on occluded-frame and all-degraded lane F1: every
+    temporal model against its single-frame reference, its equal-training
+    control and its capacity control, plus the declared primary pairs (one
+    Holm family on occluded-frame F1)."""
+    from tac_ufld.evaluation.stats import paired_comparisons
+    from tac_ufld.models.registry import resolve_spec
+
+    deg = df[df["input"] == "degraded"]
+    wide = deg.pivot_table(index=["variant", "seed"], columns="op", values="lane_f1").reset_index()
+    wide = wide.rename(columns={"occlude": "occluded_lane_f1", "all": "degraded_lane_f1"})
+    present = set(wide["variant"])
+    pairs = []
+    for v in present:
+        spec = resolve_spec(v, cfg)
+        for ref in (spec.reference, spec.budget_reference, spec.static_reference):
+            if spec.temporal and ref in present and (v, ref) not in pairs:
+                pairs.append((v, ref))
+    primary = [tuple(p) for p in cfg.evaluation.primary_pairs if all(v in present for v in p)]
+    pairs += [p for p in primary if p not in pairs]
+    metrics = {m: True for m in ("occluded_lane_f1", "degraded_lane_f1") if m in wide}
+    return paired_comparisons(wide, sorted(pairs), metrics, primary_pairs=primary, primary_metric="occluded_lane_f1")

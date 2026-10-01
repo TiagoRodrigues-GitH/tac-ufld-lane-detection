@@ -5,7 +5,8 @@
 * Paired comparisons (same seed) of each temporal variant against its
   same-family single-frame reference: mean difference, 95 % CI, exact
   two-sided Wilcoxon signed-rank p-value, and Holm-Bonferroni adjusted
-  p-values across all comparisons.
+  p-values within families: the declared primary comparisons, then one
+  exploratory family per metric.
 * ``min_attainable_p`` makes the power limit explicit: with n paired seeds
   the smallest two-sided exact Wilcoxon p is 2 / 2**n (0.125 for n = 4,
   0.031 for n = 6), so fewer than 6 seeds can never reach p < 0.05.
@@ -59,9 +60,18 @@ def holm(pvalues: list[float]) -> list[float]:
 
 
 def paired_comparisons(results: pd.DataFrame, pairs: list[tuple[str, str]], metrics: dict[str, bool],
-                       alpha: float = 0.05) -> pd.DataFrame:
+                       alpha: float = 0.05, primary_pairs: list[tuple[str, str]] | None = None,
+                       primary_metric: str | None = None) -> pd.DataFrame:
     """``pairs`` = (variant, reference); ``metrics`` maps name -> higher_is_better.
-    ``results`` needs columns variant, seed and the metrics."""
+    ``results`` needs columns variant, seed and the metrics.
+
+    Holm-Bonferroni is applied within families, not across every row: the
+    declared primary comparisons on the primary metric form one family
+    (``primary``); every other row is ``exploratory:<metric>`` and corrected
+    only within its metric. One family over all pairs and metrics would make
+    significance unreachable (with 6 seeds the smallest exact p is 0.031,
+    times m tests). ``underpowered`` = even if every seed agreed, the
+    Holm-adjusted p of this family could not drop below ``alpha``."""
     rows = []
     for variant, reference in pairs:
         a = results[results["variant"] == variant].set_index("seed")
@@ -83,7 +93,24 @@ def paired_comparisons(results: pd.DataFrame, pairs: list[tuple[str, str]], metr
                          "wilcoxon_p": p, "min_attainable_p": min_attainable_p(n)})
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["p_holm"] = holm(df["wilcoxon_p"].tolist())
+        primary = {tuple(p) for p in (primary_pairs or [])}
+        df["family"] = [
+            "primary" if (r.variant, r.reference) in primary and r.metric == primary_metric
+            else f"exploratory:{r.metric}" for r in df.itertuples()]
+        df["p_holm"] = np.nan
+        df["family_size"] = 0
+        for _, idx in df.groupby("family").groups.items():
+            df.loc[idx, "p_holm"] = holm(df.loc[idx, "wilcoxon_p"].tolist())
+            df.loc[idx, "family_size"] = int(df.loc[idx, "wilcoxon_p"].notna().sum()) or len(idx)
         df["significant"] = df["p_holm"] < alpha
-        df["underpowered"] = df["min_attainable_p"] >= alpha
+        df["underpowered"] = df["min_attainable_p"] * df["family_size"].clip(lower=1) >= alpha
     return df
+
+
+def seeds_needed(family_size: int, alpha: float = 0.05) -> int:
+    """Smallest number of paired seeds whose best possible exact Wilcoxon p,
+    Holm-adjusted for ``family_size`` tests, is below ``alpha``."""
+    n = 1
+    while min_attainable_p(n) * max(family_size, 1) >= alpha:
+        n += 1
+    return n

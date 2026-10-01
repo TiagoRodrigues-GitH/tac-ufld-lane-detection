@@ -169,6 +169,9 @@ class SplitConfig:
     # "blocks" = temporal blocks within each split group + purge gap;
     # "sequences" = whole sequences held out.
     val_strategy: str = "blocks"
+    # max_*_frames caps of val/test: False = random frames, True = whole sequences
+    # (keeps consecutive frames for jitter, the Kalman reference and carried state)
+    cap_by_sequence: bool = False
 
 
 @dataclass
@@ -318,6 +321,13 @@ class EvalConfig:
     culane_image_width: float = 1640.0
     anchor_tolerance_px: float = 10.0
     selection_metric: str = "lane_f1_iou50"
+    # Comparisons declared BEFORE the run as the paper's primary tests
+    # ([variant, reference] pairs, same seeds). They form one Holm family on
+    # the primary metric (clean test lane F1, and occluded-frame lane F1 in the
+    # robustness evaluation); every other comparison is reported as
+    # exploratory. Keep the family small: its size sets the seeds needed
+    # (``evaluation.stats.seeds_needed``: 2 pairs -> 7 seeds, 3-4 pairs -> 8).
+    primary_pairs: list[list[str]] = field(default_factory=list)
     common_postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     postprocess_grid: dict[str, list[float]] = field(
         default_factory=lambda: {
@@ -417,6 +427,10 @@ class ExperimentConfig:
         unknown = [v for v in self.model.variants if v not in VARIANTS]
         if unknown:
             raise ConfigError(f"unknown model variants {unknown}; known: {sorted(VARIANTS)}")
+        for pair in e.primary_pairs:
+            if len(pair) != 2 or any(v not in VARIANTS for v in pair):
+                raise ConfigError(f"evaluation.primary_pairs entry {pair} must be [variant, reference] of known "
+                                  f"variants")
         if self.model.v04_warm_start not in ("baseline", "v02"):
             raise ConfigError("model.v04_warm_start must be 'baseline' or 'v02'")
         if self.model.lite_history_encoder not in ("shared", "tiny"):

@@ -1,0 +1,78 @@
+# OpenLane overnight pilot (the "smoke test" before a full OpenLane run).
+# Real OpenLane data, a subset that fits one night on an RTX 3050:
+#   images: images_training_0.tar + images_validation_0.tar (about 1/16 of the
+#   training segments and 1/4 of the validation segments), annotations:
+#   lane3d_1000 (training + validation_test). Annotations whose images are not
+#   downloaded are skipped by the adapter.
+# Indicative only (2 seeds, <= 6 epochs, no HPO). It checks the pipeline on
+# real OpenLane and gives a first signal for the primary comparisons.
+#
+#   $env:OPENLANE_ROOT = "...\datasets\OpenLane"
+#   python -m tac_ufld run --config configs/openlane_pilot.yaml
+#   python -m tac_ufld robustness --runs results/openlane_pilot
+
+name: openlane_pilot
+output_dir: results
+device: auto
+description: "OpenLane overnight pilot: real OpenLane subset, 6 models x 2 seeds, <= 6 epochs, no HPO. Indicative only."
+
+data:
+  dataset: openlane                # DATASET-SPECIFIC: adapter (tac_ufld/data/openlane.py)
+  root: "${OPENLANE_ROOT}"         # DATASET-SPECIFIC: folder with images/ and lane3d_1000/
+  img_h: 320                       # DATASET-SPECIFIC: 1920x1280 source, 1.5 aspect ratio kept
+  img_w: 480
+  num_lanes: 4                     # DATASET-SPECIFIC: attribute slots left-left, left, right, right-right
+  num_row_anchors: 36
+  row_anchor_range: [0.40, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1                 # DATASET-SPECIFIC: 10 Hz, history = t-0.1 s, t-0.2 s (as configs/openlane.yaml)
+  num_workers: 6                   # 1920x1280 JPEG decoding is the bottleneck (8 CPU cores)
+  augmentation:
+    # No official UFLD setting for OpenLane: the recipe chosen on ELAS
+    # validation (configs/elas.yaml, v0.4).
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale: [0.9, 1.1]
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale: [0.85, 1.0]
+    current_frame_prob: 0.3        # degrade only the current frame of 30 % of clips (history stays clean)
+  split:
+    split_seed: 2026
+    val_strategy: sequences        # DATASET-SPECIFIC: whole training segments held out for validation
+    purge_frames: 2
+    val_fraction: 0.15
+    seen_test_fraction: 0.0
+    cap_by_sequence: true          # val/test caps keep whole segments (jitter, Kalman, carried state)
+    max_train_frames: 4000         # random frames; history frames are still read from disk
+    max_val_frames: 1000
+    max_test_frames: 3000
+
+model:
+  variants: [ufld_baseline, ufld_v03, ufld_v06, lite_baseline, lite_v05, lite_v05_static]
+
+train:
+  seeds: [1, 2]
+  epochs: 6
+  batch_size: 8
+  optimizer: adam
+  lr: 4.0e-4
+  scheduler: cos
+  warmup_iters: 100
+  early_stopping_patience: 3
+
+hpo:
+  enabled: false
+
+evaluation:
+  primary_pairs: [[ufld_v03, ufld_baseline], [lite_v05, lite_v05_static]]
+  postprocess_grid:
+    threshold: [0.3, 0.4, 0.5, 0.6]
+    min_points: [2, 3]
+    poly_degree: [0, 1]
+  latency_runs: 20
+  n_visual_examples: 6

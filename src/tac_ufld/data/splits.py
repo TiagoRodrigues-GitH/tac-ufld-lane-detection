@@ -127,12 +127,31 @@ def _purge(frame_ids: np.ndarray, labels: np.ndarray, gap: int) -> np.ndarray:
     return keep
 
 
-def cap_records(records: list[FrameRecord], max_n: int | None, key: str) -> list[FrameRecord]:
-    """Deterministic random subsample (seeded by ``key``), returned in order."""
+def cap_records(records: list[FrameRecord], max_n: int | None, key: str,
+                by_sequence: bool = False) -> list[FrameRecord]:
+    """Deterministic subsample (seeded by ``key``), returned in order.
+
+    ``by_sequence=False``: random frames. ``by_sequence=True``: whole
+    sequences in a seeded random order until ``max_n`` frames (the last one
+    cut to a contiguous run), so consecutive frames survive the cap - needed by
+    the temporal metrics (jitter, Kalman reference, carried state)."""
     if max_n is None or len(records) <= max_n:
         return records
-    chosen = sorted(random.Random(key).sample(range(len(records)), max_n))
-    return [records[i] for i in chosen]
+    if not by_sequence:
+        chosen = sorted(random.Random(key).sample(range(len(records)), max_n))
+        return [records[i] for i in chosen]
+    by_seq: dict[str, list[int]] = {}
+    for i, r in enumerate(records):
+        by_seq.setdefault(r.sequence, []).append(i)
+    order = sorted(by_seq)
+    random.Random(key).shuffle(order)
+    chosen = []
+    for seq in order:
+        idx = sorted(by_seq[seq], key=lambda i: records[i].frame_id)
+        chosen.extend(idx[: max_n - len(chosen)])
+        if len(chosen) >= max_n:
+            break
+    return [records[i] for i in sorted(chosen)]
 
 
 def split_scenes_and_blocks(
@@ -158,7 +177,8 @@ def split_scenes_and_blocks(
     caps = {"train": cfg.max_train_frames, "val": cfg.max_val_frames,
             "test": cfg.max_test_frames, "seen_test": cfg.max_seen_test_frames}
     for name in SPLIT_NAMES:
-        out[name] = cap_records(out[name], caps[name], f"{cfg.split_seed}:cap:{name}")
+        out[name] = cap_records(out[name], caps[name], f"{cfg.split_seed}:cap:{name}",
+                                by_sequence=cfg.cap_by_sequence and name != "train")
     splits = DataSplits(**out)
     check_no_leakage(splits, min_gap=min_gap, held_out_sequences=cfg.test_scenes)
     return splits
@@ -245,8 +265,9 @@ def build_splits(cfg, adapter) -> tuple[DataSplits, dict]:
             train, val = carve_validation(train, s, cfg.min_split_gap())
         splits = DataSplits(
             train=cap_records(train, s.max_train_frames, f"{s.split_seed}:cap:train"),
-            val=cap_records(val, s.max_val_frames, f"{s.split_seed}:cap:val"),
-            test=cap_records(official.get("test", []), s.max_test_frames, f"{s.split_seed}:cap:test"),
+            val=cap_records(val, s.max_val_frames, f"{s.split_seed}:cap:val", by_sequence=s.cap_by_sequence),
+            test=cap_records(official.get("test", []), s.max_test_frames, f"{s.split_seed}:cap:test",
+                             by_sequence=s.cap_by_sequence),
         )
         check_no_leakage(splits, min_gap=cfg.min_split_gap() if carved else None)
         info.update({"split_source": "official", "validation": (
