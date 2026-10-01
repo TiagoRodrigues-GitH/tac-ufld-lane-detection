@@ -37,7 +37,7 @@ datasets:
     description: "TuSimple lane benchmark, 4 lanes, 20-frame clips"
 
   openlane:
-    enabled: false
+    enabled: true      # 2026-10-01: subset downloaded and checked (scripts/check_dataset.py READY)
     root: "${OPENLANE_ROOT}"
     config: configs/openlane.yaml
     smoke_config: configs/openlane_smoke.yaml

@@ -1,7 +1,7 @@
 # Overnight OpenLane pilot: training + evaluation + report, then the robustness evaluation.
 # Runs detached; progress in results/openlane_pilot/run.log, console output in
-# results/openlane_pilot_console.log. Start it with:
-#   Start-Process powershell -ArgumentList '-NoProfile','-File','scripts\run_openlane_pilot.ps1' -WindowStyle Minimized
+# results/openlane_pilot_{run,robustness}.{out,err}.log. Start it with:
+#   Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','scripts\run_openlane_pilot.ps1' -WindowStyle Minimized
 $ErrorActionPreference = "Continue"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
@@ -9,11 +9,18 @@ $python = Join-Path (Split-Path -Parent $repo) ".venv\Scripts\python.exe"
 if (-not $env:OPENLANE_ROOT) {
   $env:OPENLANE_ROOT = Join-Path (Split-Path -Parent (Split-Path -Parent $repo)) "datasets\OpenLane"
 }
-$log = Join-Path $repo "results\openlane_pilot_console.log"
-New-Item -ItemType Directory -Force (Join-Path $repo "results") | Out-Null
-"[{0}] OPENLANE_ROOT={1}" -f (Get-Date -Format s), $env:OPENLANE_ROOT | Out-File $log -Encoding utf8
-"[{0}] run" -f (Get-Date -Format s) | Out-File $log -Append -Encoding utf8
-& $python -m tac_ufld run --config configs/openlane_pilot.yaml *>> $log
-"[{0}] run exit code {1}; robustness" -f (Get-Date -Format s), $LASTEXITCODE | Out-File $log -Append -Encoding utf8
-& $python -m tac_ufld robustness --runs results/openlane_pilot *>> $log
-"[{0}] robustness exit code {1}; done" -f (Get-Date -Format s), $LASTEXITCODE | Out-File $log -Append -Encoding utf8
+$env:PYTHONUTF8 = "1"
+$results = Join-Path $repo "results"
+New-Item -ItemType Directory -Force $results | Out-Null
+$status = Join-Path $results "openlane_pilot_status.log"
+
+function Step([string]$name, [string[]]$arguments) {
+  "[{0}] {1} started (OPENLANE_ROOT={2})" -f (Get-Date -Format s), $name, $env:OPENLANE_ROOT | Out-File $status -Append -Encoding utf8
+  $p = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repo -NoNewWindow -Wait -PassThru `
+      -RedirectStandardOutput (Join-Path $results "openlane_pilot_$name.out.log") `
+      -RedirectStandardError (Join-Path $results "openlane_pilot_$name.err.log")
+  "[{0}] {1} exit code {2}" -f (Get-Date -Format s), $name, $p.ExitCode | Out-File $status -Append -Encoding utf8
+}
+
+Step "run" @("-m", "tac_ufld", "run", "--config", "configs/openlane_pilot.yaml")
+Step "robustness" @("-m", "tac_ufld", "robustness", "--runs", "results/openlane_pilot")

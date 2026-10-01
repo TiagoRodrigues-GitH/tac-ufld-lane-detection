@@ -14,7 +14,7 @@
 name: openlane_pilot
 output_dir: results
 device: auto
-description: "OpenLane overnight pilot: real OpenLane subset, 6 models x 2 seeds, <= 6 epochs, no HPO. Indicative only."
+description: "OpenLane overnight pilot: real OpenLane subset (50+50 segments), primary pairs (4 models) x 2 seeds, 4 epochs, no HPO. Indicative only."
 
 data:
   dataset: openlane                # DATASET-SPECIFIC: adapter (tac_ufld/data/openlane.py)
@@ -50,16 +50,18 @@ data:
     val_fraction: 0.15
     seen_test_fraction: 0.0
     cap_by_sequence: true          # val/test caps keep whole segments (jitter, Kalman, carried state)
-    max_train_frames: 6000         # random frames (about all of images_training_0 after the attribute filter); history from disk
+    max_train_frames: 3000         # random frames over all 48 training segments (10 Hz: neighbours are near-duplicates); history from disk
     max_val_frames: 1000
     max_test_frames: 3000
 
 model:
-  variants: [ufld_baseline, ufld_v03, ufld_v06, lite_baseline, lite_v05, lite_v05_static]
+  # The two declared primary comparisons only: measured 3.8 min/epoch for the UFLD baseline on
+  # 6,800 frames (RTX 3050, GPU-bound), so six variants x 2 seeds would not fit one night.
+  variants: [ufld_baseline, ufld_v03, lite_v05, lite_v05_static]
 
 train:
   seeds: [1, 2]
-  epochs: 6
+  epochs: 4
   batch_size: 8
   optimizer: adam
   lr: 4.0e-4
