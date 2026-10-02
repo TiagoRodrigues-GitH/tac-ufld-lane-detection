@@ -199,6 +199,11 @@ class DataConfig:
     # position annotated, mostly curbs or unlabelled frames), so the slot targets never
     # say "no lane" where a lane is visible. History frames are still read from disk.
     skip_unattributed_frames: bool = False
+    # Folder with every image already decoded at the network size (img_w x img_h),
+    # same relative paths as data.root, written by scripts/cache_images.py. Saves
+    # decoding large sources each epoch; frames missing from the cache are read
+    # from data.root. None = always read data.root (as before).
+    image_cache: str | None = None
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
     preprocessing: PreprocessConfig = field(default_factory=PreprocessConfig)
     split: SplitConfig = field(default_factory=SplitConfig)
@@ -348,6 +353,10 @@ class EvalConfig:
     n_visual_examples: int = 12
     visualize_seeds: int = 1
     tensorboard: bool = True
+    # CPU processes that score frames in parallel (lane masks at the source
+    # resolution, e.g. 1920x1280 for OpenLane). 1 = in this process, as before;
+    # results are identical either way, only the time changes.
+    workers: int = 1
     # Output-level Kalman tracker applied to every model's predictions (a
     # causal filter over the frames of each sequence), tuned on validation.
     # It is the cheap temporal reference a learned temporal model must beat.

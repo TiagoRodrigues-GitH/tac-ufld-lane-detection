@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import logging
 import random
+from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from tac_ufld.config import DataConfig
+from tac_ufld.config import PROJECT_ROOT, DataConfig, expand_env
 from tac_ufld.data.base import LaneDatasetAdapter
 from tac_ufld.data.geometric import GeometricAugmenter, encode_targets_warped, warp_frames
 from tac_ufld.data.preprocess import Preprocessor, channel_stats, normalize_channels
@@ -32,6 +34,37 @@ from tac_ufld.data.transforms import PhotometricAugmenter, degrade_current_frame
 from tac_ufld.data.types import FrameRecord
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _absolute(path: str, context: str) -> Path:
+    p = Path(expand_env(path, context))
+    return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+
+
+def image_cache_paths(cfg: DataConfig) -> Callable[[str], str] | None:
+    """``data.image_cache``: maps an image under ``data.root`` to its copy decoded at the network size
+    (scripts/cache_images.py), falling back to the original when the copy is missing. None if no cache."""
+    if not cfg.image_cache:
+        return None
+    root, cache = _absolute(cfg.root, "data.root"), _absolute(cfg.image_cache, "data.image_cache")
+    found = missing = 0
+
+    def cached(path: str) -> str:
+        nonlocal found, missing
+        try:
+            candidate = cache / Path(path).resolve().relative_to(root).with_suffix(".jpg")
+        except ValueError:
+            return path
+        if candidate.exists():
+            found += 1
+            return str(candidate)
+        missing += 1
+        if missing == 1:
+            LOGGER.warning("image cache %s has no copy of %s: reading the original", cache, path)
+        return path
+
+    cached.stats = lambda: (found, missing)  # type: ignore[attr-defined]
+    return cached
 
 
 class TemporalLaneDataset(Dataset):
@@ -76,6 +109,11 @@ class TemporalLaneDataset(Dataset):
         self.mean, self.std = channel_stats(cfg.preprocessing, cfg.normalize)
         self.fallback_frames = 0
         self.context_paths = [self._context(r, adapter) for r in records]
+        cached = image_cache_paths(cfg)
+        if cached is not None:
+            self.context_paths = [[cached(p) for p in paths] for paths in self.context_paths]
+            found, missing = cached.stats()  # type: ignore[attr-defined]
+            LOGGER.info("image cache: %d of %d frames read at network size", found, found + missing)
         self.targets = [
             encode_targets(r, cfg.img_w, cfg.img_h, row_anchors, cfg.griding_num) for r in records
         ]

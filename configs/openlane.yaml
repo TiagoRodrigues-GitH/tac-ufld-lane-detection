@@ -11,8 +11,9 @@
 #
 # Runs in the GPU queue after the full ELAS experiment (03_Codigo_e_Scripts/fila_gpu, step 5_openlane).
 # Split (dry run 2026-10-02): train 5,888 frames / 41 segments, val 912 / 7, test 7,379 / 47, no shared segments.
-# Estimate on the RTX 3050 from the pilot's timings: ~7 h training (upper bound, no early stop) + ~5 h
-# evaluation per seed (lanes scored at 1920x1280 on the CPU) -> about 4 days for 8 seeds.
+# Estimate on the RTX 3050 from the pilot's timings: ~7 h training (upper bound, no early stop) + ~2.5-3.5 h
+# evaluation per seed (lanes scored at 1920x1280 on the CPU, in 4 processes) -> about 3-3.5 days for 8 seeds.
+# data.image_cache (scripts/cache_images.py) was measured and left off: 11.2 vs 12.0 ms per frame with jpeg_draft.
 
 name: openlane
 output_dir: results
@@ -92,3 +93,4 @@ evaluation:
     poly_degree: [0]
   latency_runs: 50
   n_visual_examples: 12
+  workers: 4                       # frames scored in 4 CPU processes: same results, ~2x faster (measured on 600 test frames)

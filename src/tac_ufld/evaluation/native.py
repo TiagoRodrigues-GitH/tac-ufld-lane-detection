@@ -106,23 +106,37 @@ def _f1_from_rates(fp: float, fn: float) -> float:
 # ------------------------------------------------------ CULane-style (IoU F1)
 
 
-def iou_f1_all_lanes(records: list[FrameRecord], pred_lanes: list[list], line_width: int,
-                     threshold: float = 0.5, prefix: str = "native") -> dict[str, float]:
-    tp = fp = fn = 0
-    for rec, lanes in zip(records, pred_lanes):
-        gt = rec.meta.get("eval_lanes")
-        if gt is None:
-            gt = rec.present_lanes()
-        w, h = rec.image_size
-        pred = [lane for lane in lanes if lane is not None]
-        pm = [lane_mask(lane, w, h, line_width) for lane in pred]
-        gm = [lane_mask(lane, w, h, line_width) for lane in gt]
-        m = match_lanes(iou_matrix(pm, gm), threshold)
-        tp, fp, fn = tp + m.tp, fp + m.fp, fn + m.fn
+def all_lanes_counts(rec: FrameRecord, lanes: list, line_width: int, threshold: float = 0.5) -> tuple[int, int, int]:
+    """TP, FP, FN of one frame against every annotated lane (one term of ``iou_f1_all_lanes``)."""
+    gt = rec.meta.get("eval_lanes")
+    if gt is None:
+        gt = rec.present_lanes()
+    w, h = rec.image_size
+    pred = [lane for lane in lanes if lane is not None]
+    pm = [lane_mask(lane, w, h, line_width) for lane in pred]
+    gm = [lane_mask(lane, w, h, line_width) for lane in gt]
+    m = match_lanes(iou_matrix(pm, gm), threshold)
+    return m.tp, m.fp, m.fn
+
+
+def all_lanes_metrics(tp: int, fp: int, fn: int, threshold: float, prefix: str) -> dict[str, float]:
     p, r, f1 = prf(tp, fp, fn)
     tag = f"iou{int(round(threshold * 100)):02d}"
     return {f"{prefix}_f1_{tag}": f1, f"{prefix}_precision_{tag}": p, f"{prefix}_recall_{tag}": r,
             f"{prefix}_tp_{tag}": tp, f"{prefix}_fp_{tag}": fp, f"{prefix}_fn_{tag}": fn}
+
+
+def iou_f1_all_lanes(records: list[FrameRecord], pred_lanes: list[list], line_width: int,
+                     threshold: float = 0.5, prefix: str = "native") -> dict[str, float]:
+    tp = fp = fn = 0
+    for rec, lanes in zip(records, pred_lanes):
+        t, f, n = all_lanes_counts(rec, lanes, line_width, threshold)
+        tp, fp, fn = tp + t, fp + f, fn + n
+    return all_lanes_metrics(tp, fp, fn, threshold, prefix)
+
+
+# Datasets whose native metric is the all-lanes IoU F1 (a sum over frames, so it can be scored in parallel)
+ALL_LANES_NATIVE = {"culane": "native_culane", "openlane": "native_openlane"}
 
 
 def native_metrics(records: list[FrameRecord], pred_lanes: list[list]) -> dict[str, float]:
@@ -132,8 +146,6 @@ def native_metrics(records: list[FrameRecord], pred_lanes: list[list]) -> dict[s
     dataset = records[0].dataset
     if dataset == "tusimple":
         return tusimple_metrics(records, pred_lanes)
-    if dataset == "culane":
-        return iou_f1_all_lanes(records, pred_lanes, line_width=30, prefix="native_culane")
-    if dataset == "openlane":
-        return iou_f1_all_lanes(records, pred_lanes, line_width=30, prefix="native_openlane")
+    if dataset in ALL_LANES_NATIVE:
+        return iou_f1_all_lanes(records, pred_lanes, line_width=30, prefix=ALL_LANES_NATIVE[dataset])
     return {}
