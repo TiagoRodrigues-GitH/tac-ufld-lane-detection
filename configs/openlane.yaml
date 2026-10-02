@@ -1,28 +1,41 @@
-# OpenLane (v1, 2D lanes) template. Adapter checked with synthetic fixtures
-# only; run `python -m tac_ufld validate-dataset --dataset openlane` first.
-# There is no official UFLD OpenLane setting; these values are a starting
-# point (1920x1280 source -> 320x480 keeps the 1.5 aspect ratio).
+# OpenLane (v1, 2D lanes): full run on the local subset, the article's second dataset after ELAS.
+# Data (LaneDetection/datasets/OpenLane): images_training_0 + images_validation_0 with the lane3d_1000
+# annotations, about 1/16 of the training and 1/4 of the validation segments; annotations whose
+# images are not downloaded are skipped by the adapter. Not the whole OpenLane benchmark.
+# Speed settings (jpeg_draft, skipped unattributed frames, 4-combination post-processing grid) were
+# measured in configs/openlane_pilot.yaml. There is no official UFLD OpenLane setting
+# (1920x1280 source -> 480x320 keeps the 1.5 aspect ratio).
+#
+#   $env:OPENLANE_ROOT = "...\datasets\OpenLane"
+#   python -m tac_ufld run --config configs/openlane.yaml --confirm --resume
+#
+# Runs in the GPU queue after the full ELAS experiment (03_Codigo_e_Scripts/fila_gpu, step 5_openlane).
+# Split (dry run 2026-10-02): train 5,888 frames / 41 segments, val 912 / 7, test 7,379 / 47, no shared segments.
+# Estimate on the RTX 3050 from the pilot's timings: ~7 h training (upper bound, no early stop) + ~5 h
+# evaluation per seed (lanes scored at 1920x1280 on the CPU) -> about 4 days for 8 seeds.
 
 name: openlane
 output_dir: results
 device: auto
-requires_confirmation: true
+requires_confirmation: true   # several GPU-days: `run` needs --confirm
+description: "OpenLane full run on the local subset: the two declared primary pairs, 8 seeds, every available training frame, no HPO (ELAS training recipe)."
 
 data:
-  dataset: openlane               # DATASET-SPECIFIC: adapter tac_ufld/data/openlane.py
-  root: "${OPENLANE_ROOT}"        # DATASET-SPECIFIC: folder with images/ and lane3d_1000/ (or lane3d_300/)
-  img_h: 320                      # DATASET-SPECIFIC: source 1920x1280; no official UFLD setting
+  dataset: openlane                # DATASET-SPECIFIC: adapter tac_ufld/data/openlane.py
+  root: "${OPENLANE_ROOT}"         # DATASET-SPECIFIC: folder with images/ and lane3d_1000/
+  img_h: 320                       # DATASET-SPECIFIC: 1920x1280 source, 1.5 aspect ratio kept
   img_w: 480
-  num_lanes: 4          # attribute slots: left-left, left, right, right-right
-  num_row_anchors: 36             # DATASET-SPECIFIC: starting point, not an official value
+  num_lanes: 4                     # DATASET-SPECIFIC: attribute slots left-left, left, right, right-right
+  num_row_anchors: 36              # starting point, not an official value
   row_anchor_range: [0.40, 0.995]
-  griding_num: 100                # DATASET-SPECIFIC: starting point, not an official value
+  griding_num: 100
   num_frames: 3
-  temporal_step: 1      # 10 Hz: history = t-0.1 s, t-0.2 s
-  num_workers: 4
+  temporal_step: 1                 # DATASET-SPECIFIC: 10 Hz, history = t-0.1 s, t-0.2 s
+  num_workers: 6                   # 1920x1280 JPEG decoding is the bottleneck (8 CPU cores)
+  jpeg_draft: true                 # decode at 1/4 scale (exactly 480x320): 8.9 ms instead of 39 ms per image
+  skip_unattributed_frames: true   # DATASET-SPECIFIC: ~1/3 of frames have only attribute-0 lanes (no slot labels)
   augmentation:
-    # No official UFLD setting for OpenLane: the recipe chosen on ELAS
-    # validation (configs/elas.yaml, v0.4). Revisit on OpenLane validation.
+    # No official UFLD setting for OpenLane: the recipe chosen on ELAS validation (configs/elas.yaml, v0.4).
     geometric:
       enabled: true
       prob: 0.7
@@ -32,26 +45,50 @@ data:
       rotate_deg: 5.0
       perspective: 0.03
       crop_scale: [0.85, 1.0]
-    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
+    current_frame_prob: 0.3        # degrade only the current frame of 30 % of clips (history stays clean)
   split:
     split_seed: 2026
-    val_strategy: sequences   # whole training segments held out for validation
+    val_strategy: sequences        # DATASET-SPECIFIC: whole training segments held out for validation
     purge_frames: 2
-    val_fraction: 0.1
+    val_fraction: 0.15
     seen_test_fraction: 0.0
+    cap_by_sequence: true          # the validation cap keeps whole segments (jitter, Kalman, carried state)
+    max_train_frames: null         # every available training frame (the pilot used 3,000)
+    max_val_frames: 1000           # validation runs after every epoch
+    max_test_frames: null          # the whole local official-validation set is the test set
 
 model:
-  # Add v0.4 models as needed (budget!): ufld_baseline_ct, ufld_v06 (aligned),
-  # ufld_v07 (recurrent), lite_baseline, lite_v05, lite_v05_static, lite_v06.
-  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
+  # The two declared primary comparisons. lite_baseline is trained as well: it is lite_v05's warm start.
+  variants: [ufld_baseline, ufld_v03, lite_v05, lite_v05_static]
+  backbone: "18"
+  pretrained: true                 # ImageNet weights, as in the UFLD paper
 
 train:
-  seeds: [1, 2, 3, 4, 5, 6]
-  epochs: 30
-  batch_size: 16
-  optimizer: adam
+  seeds: [1, 2, 3, 4, 5, 6, 7, 8]  # 2 primary comparisons with Holm need >= 7 paired seeds (as configs/elas.yaml)
+  epochs: 12                       # all frames per epoch (~3x the pilot's 3,000); pilot F1 was still rising at epoch 4
+  batch_size: 8                    # 6 GB GPU (the pilot's value)
+  optimizer: adam                  # ELAS training recipe, no HPO on OpenLane
   lr: 4.0e-4
+  lr_fusion: 5.0e-4
+  weight_decay: 1.0e-4
   scheduler: cos
+  warmup_iters: 100
+  grad_clip_norm: 1.0
+  early_stopping_patience: 6        # >= 7 epochs: the lite models were still near lane-F1 0 after the pilot's 4
+  amp: true
+  lambda_temporal: 0.01
+  lambda_coord: 0.35
 
 hpo:
   enabled: false
+
+evaluation:
+  primary_pairs: [[ufld_v03, ufld_baseline], [lite_v05, lite_v05_static]]
+  # 4 combinations (not the default 45): the post-processing sweep scores lanes at 1920x1280 on the CPU
+  # (27 min per model with 16 combinations in the pilot).
+  postprocess_grid:
+    threshold: [0.4, 0.5]
+    min_points: [2, 3]
+    poly_degree: [0]
+  latency_runs: 50
+  n_visual_examples: 12
