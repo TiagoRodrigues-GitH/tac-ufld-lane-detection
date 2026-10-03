@@ -72,10 +72,10 @@ data:
     max_seen_test_frames: null
 
 model:
-  # Every model and control of v0.4 (docs/TEMPORAL_IMPROVEMENTS.md). A shorter
-  # "core" run: --variants ufld_baseline ufld_baseline_ct ufld_v03 ufld_v07
-  #   lite_baseline lite_baseline_ct lite_v05 lite_v05_static lite_v06
-  variants: [ufld_baseline, ufld_baseline_ct, ufld_v02, ufld_v03, ufld_v04, ufld_v06, ufld_v07,
+  # Core set (2026-10-02): both primary pairs, their controls, v0.7 and lite v0.6; ~2 days shorter than
+  # every model and control of v0.4 (docs/TEMPORAL_IMPROVEMENTS.md), which adds ufld_v02, ufld_v04 and
+  # ufld_v06 (their HPO studies in results/elas_full/hpo are kept: ufld_v02 finished).
+  variants: [ufld_baseline, ufld_baseline_ct, ufld_v03, ufld_v07,
              lite_baseline, lite_baseline_ct, lite_v05, lite_v05_static, lite_v06]
   backbone: "18"
   pretrained: true              # ImageNet weights, as in the UFLD paper
