@@ -2,6 +2,15 @@
 
 This is a reproducible research pipeline. It compares the **Ultra-Fast Lane Detection (UFLD)** baseline (Qin et al., ECCV 2020) with lightweight **temporal** variants that fuse information from previous video frames. It starts with the **ELAS** dataset; a CULane adapter is included. The code is modular, configured with YAML files, and tested.
 
+| | |
+|---|---|
+| **Author** | Tiago Rodrigues · Universidade Tecnológica Federal do Paraná (UTFPR) |
+| **Date** | 2026-09-29 |
+| **Context** | Research project, supervised (lane detection for ADAS) |
+| **Stack** | Python · PyTorch · Optuna |
+
+> **Resumo (PT).** Pipeline reprodutível que compara o detector de faixas UFLD com variantes temporais leves, no dataset brasileiro ELAS e no OpenLane, com protocolo estatístico (várias sementes, testes pareados) e robustez.
+
 The package merges two earlier single-file programs: the supervisor's reference notebook (CULane, official UFLD, temporal variants v0.2–v0.4) and the ELAS development script. It also fixes the problems found in the code audit ([docs/AUDIT_REPORT.md](docs/AUDIT_REPORT.md)). [docs/MIGRATION.md](docs/MIGRATION.md) maps every original function to its new location.
 
 > **Status.** The pipeline has been verified: 50 tests pass, including an end-to-end run on synthetic data, a regression test for the label geometry on the real ELAS data, and strict loading of the ImageNet weights. A smoke run on real ELAS data completes on the GPU. **No research results have been produced yet.** Results produced by the old scripts are invalid because of the label bug (see [Fixes](#what-was-fixed)).
