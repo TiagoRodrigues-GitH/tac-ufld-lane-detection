@@ -21,105 +21,339 @@ Needs the CARLA server running (packaged 0.9.16), and the CARLA Python client (P
     C:\\CARLA\\venv312\\Scripts\\python.exe scripts\\carla_collect.py --town Town04 --clips 50 --out D:\\carla_lanes
 
 Use different towns for train and test (``--split test``) to keep the test scene-disjoint.
+
+Design (docs/CARLA.md, "Design"): pure geometry (``CameraModel``, ``sample_rows``, ``occluded_fraction``) has
+no CARLA dependency and is unit-tested; ``lane_boundaries`` reads the road map; ``synchronous_world`` and
+``Scene`` own the simulator state and always restore or destroy it; ``ClipWriter`` owns the file layout;
+``collect_clips`` composes them.
 """
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import queue
 import random
-import time
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 
-try:
+if TYPE_CHECKING:  # the CARLA client is needed to collect, not to import this module or test its geometry
     import carla
-except ImportError as exc:  # pragma: no cover - only on machines with the CARLA client
-    raise SystemExit("CARLA client not installed: use the Python 3.12 venv with `pip install carla==0.9.16`") from exc
 
-W, H, FOV = 1280, 720, 90.0
-H_SAMPLES = list(range(160, 720, 10))
+H_SAMPLES = tuple(range(160, 720, 10))
 FRAMES_PER_CLIP = 20
 FPS = 20
+WARMUP_TICKS = 40                 # let the cars start moving before the first clip
+MAX_ATTEMPTS_PER_CLIP = 4         # clips with fewer than MIN_LANES usable lanes are retried
+MIN_LANES, MIN_POINTS_PER_LANE = 2, 5
+SENSOR_TIMEOUT_S = 30.0
+EGO_BLUEPRINT = "vehicle.lincoln.mkz_2020"
+CAMERA_X_M, CAMERA_Z_M, CAMERA_PITCH_DEG = 1.0, 1.5, -3.0
 # Semantic tags (CARLA >= 0.9.14) that hide the road: pedestrian, rider, car, truck, bus, train, motorcycle, bicycle.
-OCCLUDERS = np.array([12, 13, 14, 15, 16, 17, 18, 19], dtype=np.uint8)
-WEATHERS = ["ClearNoon", "CloudyNoon", "WetNoon", "WetCloudyNoon", "MidRainyNoon", "HardRainNoon",
-            "ClearSunset", "CloudySunset", "WetSunset", "SoftRainSunset", "ClearNight", "WetNight"]
+OCCLUDER_TAGS = np.array([12, 13, 14, 15, 16, 17, 18, 19], dtype=np.uint8)
+WEATHERS = ("ClearNoon", "CloudyNoon", "WetNoon", "WetCloudyNoon", "MidRainyNoon", "HardRainNoon",
+            "ClearSunset", "CloudySunset", "WetSunset", "SoftRainSunset", "ClearNight", "WetNight")
 
 
-def intrinsics() -> np.ndarray:
-    f = W / (2.0 * math.tan(math.radians(FOV) / 2.0))
-    return np.array([[f, 0, W / 2.0], [0, f, H / 2.0], [0, 0, 1.0]])
+def load_carla() -> Any:
+    """The CARLA client module, or a clear exit on machines without it."""
+    try:
+        import carla
+    except ImportError as exc:
+        raise SystemExit("CARLA client not installed: use the Python 3.12 venv with `pip install carla==0.9.16`") from exc
+    return carla
 
 
-def project(points: np.ndarray, camera: carla.Actor, k: np.ndarray) -> np.ndarray:
-    """World points (N, 3) -> image points (N, 2); NaN for points behind the camera."""
-    world_to_cam = np.array(camera.get_transform().get_inverse_matrix())
-    homo = np.c_[points, np.ones(len(points))].T
-    cam = world_to_cam @ homo  # UE axes: x forward, y right, z up
-    xyz = np.stack([cam[1], -cam[2], cam[0]])  # -> x right, y down, z forward
-    uv = (k @ xyz)[:2] / np.where(xyz[2] > 0.5, xyz[2], np.nan)
-    return uv.T
+# --------------------------------------------------------------------------- pure geometry (no CARLA)
+
+@dataclass(frozen=True)
+class CameraModel:
+    """Pinhole camera matching CARLA's RGB sensor attributes."""
+    width: int = 1280
+    height: int = 720
+    fov_deg: float = 90.0
+
+    def intrinsics(self) -> np.ndarray:
+        f = self.width / (2.0 * math.tan(math.radians(self.fov_deg) / 2.0))
+        return np.array([[f, 0.0, self.width / 2.0], [0.0, f, self.height / 2.0], [0.0, 0.0, 1.0]])
+
+    def project(self, points: np.ndarray, world_to_camera: np.ndarray) -> np.ndarray:
+        """World points (N, 3) -> pixels (N, 2); NaN for points less than 0.5 m in front of the camera.
+
+        ``world_to_camera`` is CARLA's 4x4 inverse transform (Unreal axes: x forward, y right, z up).
+        """
+        cam = world_to_camera @ np.c_[points, np.ones(len(points))].T
+        xyz = np.stack([cam[1], -cam[2], cam[0]])  # -> x right, y down, z forward
+        uv = (self.intrinsics() @ xyz)[:2] / np.where(xyz[2] > 0.5, xyz[2], np.nan)
+        return uv.T
 
 
-def boundary_polylines(world_map: carla.Map, location: carla.Location, length_m: float = 80.0,
-                       step_m: float = 1.0) -> list[np.ndarray]:
-    """3D polylines of the ego lane boundaries and of the outer boundaries of the adjacent lanes
-    (same direction, driving lanes), up to 4 lines, ordered left to right."""
-    ego = world_map.get_waypoint(location, project_to_road=True, lane_type=carla.LaneType.Driving)
-    if ego is None:
-        return []
-    lanes = [ego]
-    left, right = ego.get_left_lane(), ego.get_right_lane()
-    def same_dir(wp) -> bool:
-        return wp is not None and wp.lane_type == carla.LaneType.Driving and wp.lane_id * ego.lane_id > 0
+def sample_rows(uv: np.ndarray, width: int, h_samples: tuple[int, ...] = H_SAMPLES) -> list[int]:
+    """x at each row along an image polyline ordered near -> far; -2 where absent or off-image.
 
-    if same_dir(left):
-        lanes.insert(0, left)
-    if same_dir(right):
-        lanes.append(right)
-
-    def walk(start: carla.Waypoint, side: float) -> np.ndarray:
-        pts, wp, travelled = [], start, 0.0
-        while wp is not None and travelled <= length_m:
-            t = wp.transform
-            r = t.get_right_vector()
-            off = side * wp.lane_width / 2.0
-            pts.append([t.location.x + r.x * off, t.location.y + r.y * off, t.location.z + r.z * off])
-            nxt = wp.next(step_m)
-            wp = nxt[0] if nxt else None
-            travelled += step_m
-        return np.asarray(pts, dtype=np.float64)
-
-    lines = []
-    if lanes[0] is not ego:  # outer boundary of the left neighbour
-        lines.append(walk(lanes[0], -1.0))
-    lines += [walk(ego, -1.0), walk(ego, +1.0)]
-    if lanes[-1] is not ego:  # outer boundary of the right neighbour
-        lines.append(walk(lanes[-1], +1.0))
-    return lines
-
-
-def sample_rows(uv: np.ndarray) -> list[int]:
-    """x at each h_sample row along an image polyline (near -> far); -2 if absent or off-image."""
+    Only the first crossing from the near end counts: it is the visible part of the boundary.
+    """
     xs = []
-    for y in H_SAMPLES:
+    for y in h_samples:
         x_at = -2
-        for (x0, y0), (x1, y1) in zip(uv[:-1], uv[1:], strict=True):
+        for (x0, y0), (x1, y1) in itertools.pairwise(uv):
             if np.isnan([x0, y0, x1, y1]).any() or y0 == y1:
                 continue
             if min(y0, y1) <= y <= max(y0, y1):
                 x = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
-                if 0 <= x < W:
-                    x_at = int(round(x))
-                break  # first crossing from the near end: the visible part of the boundary
+                if 0 <= x < width:
+                    x_at = round(x)
+                break
         xs.append(x_at)
     return xs
 
 
-def main() -> None:
+def occluded_fraction(tags: np.ndarray, lanes: list[list[int]], h_samples: tuple[int, ...] = H_SAMPLES,
+                      occluders: np.ndarray = OCCLUDER_TAGS) -> float:
+    """Share of labelled lane points covered by an occluder in the semantic tag image (H, W)."""
+    points = [(y, x) for xs in lanes for x, y in zip(xs, h_samples, strict=True) if x >= 0]
+    if not points:
+        return 0.0
+    rows, cols = np.array(points).T
+    return float(np.isin(tags[rows, cols], occluders).mean())
+
+
+def usable_lanes(lanes: list[list[int]]) -> list[list[int]]:
+    return [xs for xs in lanes if sum(x >= 0 for x in xs) >= MIN_POINTS_PER_LANE]
+
+
+# --------------------------------------------------------------------------- CARLA road map
+
+def _same_direction_driving(lane: carla.Waypoint | None, ego: carla.Waypoint, carla_mod: Any) -> bool:
+    return lane is not None and lane.lane_type == carla_mod.LaneType.Driving and lane.lane_id * ego.lane_id > 0
+
+
+def _walk_boundary(start: carla.Waypoint, side: float, length_m: float, step_m: float) -> np.ndarray:
+    """3D points of one lane edge (side -1 left, +1 right) from ``start`` forward."""
+    points, waypoint, travelled = [], start, 0.0
+    while waypoint is not None and travelled <= length_m:
+        t = waypoint.transform
+        r = t.get_right_vector()
+        offset = side * waypoint.lane_width / 2.0
+        points.append([t.location.x + r.x * offset, t.location.y + r.y * offset, t.location.z + r.z * offset])
+        ahead = waypoint.next(step_m)
+        waypoint = ahead[0] if ahead else None
+        travelled += step_m
+    return np.asarray(points, dtype=np.float64)
+
+
+def lane_boundaries(world_map: carla.Map, location: carla.Location, length_m: float = 80.0,
+                    step_m: float = 1.0) -> list[np.ndarray]:
+    """Ego-lane boundaries plus the outer boundaries of same-direction neighbours: up to 4, left to right."""
+    carla_mod = load_carla()
+    ego = world_map.get_waypoint(location, project_to_road=True, lane_type=carla_mod.LaneType.Driving)
+    if ego is None:
+        return []
+    left, right = ego.get_left_lane(), ego.get_right_lane()
+    lines = []
+    if _same_direction_driving(left, ego, carla_mod):
+        lines.append(_walk_boundary(left, -1.0, length_m, step_m))
+    lines += [_walk_boundary(ego, -1.0, length_m, step_m), _walk_boundary(ego, +1.0, length_m, step_m)]
+    if _same_direction_driving(right, ego, carla_mod):
+        lines.append(_walk_boundary(right, +1.0, length_m, step_m))
+    return lines
+
+
+# --------------------------------------------------------------------------- simulator state
+
+@contextmanager
+def synchronous_world(client: carla.Client, town: str, seed: int) -> Iterator[tuple[carla.World, Any]]:
+    """Load the town in synchronous mode at FPS; restore the previous settings on exit, even after errors."""
+    world = client.get_world()
+    if not world.get_map().name.endswith(town):
+        world = client.load_world(town)
+    settings = world.get_settings()
+    # fixed_delta_seconds is None in asynchronous mode, which carla.WorldSettings(...) rejects: keep the values
+    original = (settings.synchronous_mode, settings.fixed_delta_seconds, settings.no_rendering_mode)
+    settings.synchronous_mode, settings.fixed_delta_seconds = True, 1.0 / FPS
+    world.apply_settings(settings)
+    traffic_manager = client.get_trafficmanager()
+    traffic_manager.set_synchronous_mode(True)
+    traffic_manager.set_random_device_seed(seed)
+    try:
+        yield world, traffic_manager
+    finally:
+        traffic_manager.set_synchronous_mode(False)
+        restore = world.get_settings()
+        restore.synchronous_mode, restore.fixed_delta_seconds, restore.no_rendering_mode = original
+        world.apply_settings(restore)
+
+
+class Scene:
+    """Ego car with an RGB and a semantic camera, plus NPC traffic; destroys everything it spawned on exit."""
+
+    def __init__(self, client: carla.Client, world: carla.World, traffic_manager: Any, camera: CameraModel,
+                 traffic: int, rng: random.Random) -> None:
+        self._client, self._world, self._camera = client, world, camera
+        self._actors: list[carla.Actor] = []
+        self._sensors: dict[str, tuple[carla.Sensor, queue.Queue]] = {}
+        try:
+            self._populate(traffic_manager, traffic, rng)
+        except BaseException:  # a failed spawn must not leave cars or cameras in the simulator
+            self.close()
+            raise
+
+    def _populate(self, traffic_manager: Any, traffic: int, rng: random.Random) -> None:
+        world = self._world
+        library = world.get_blueprint_library()
+        spawn_points = world.get_map().get_spawn_points()
+        rng.shuffle(spawn_points)
+        self.ego = self._spawn(library.find(EGO_BLUEPRINT), spawn_points[0])
+        four_wheeled = [b for b in library.filter("vehicle.*") if int(b.get_attribute("number_of_wheels")) == 4]
+        self.npc_count = 0
+        for point in spawn_points[1:traffic + 1]:
+            npc = world.try_spawn_actor(rng.choice(four_wheeled), point)
+            if npc:
+                npc.set_autopilot(True, traffic_manager.get_port())
+                self._actors.append(npc)
+                self.npc_count += 1
+        self.ego.set_autopilot(True, traffic_manager.get_port())
+        traffic_manager.ignore_lights_percentage(self.ego, 100.0)
+        for name, kind in (("rgb", "sensor.camera.rgb"), ("sem", "sensor.camera.semantic_segmentation")):
+            self._attach_camera(library, name, kind)
+
+    def _spawn(self, blueprint: carla.ActorBlueprint, transform: carla.Transform) -> carla.Actor:
+        actor = self._world.spawn_actor(blueprint, transform)
+        self._actors.append(actor)
+        return actor
+
+    def _attach_camera(self, library: carla.BlueprintLibrary, name: str, kind: str) -> None:
+        carla_mod = load_carla()
+        blueprint = library.find(kind)
+        blueprint.set_attribute("image_size_x", str(self._camera.width))
+        blueprint.set_attribute("image_size_y", str(self._camera.height))
+        blueprint.set_attribute("fov", str(self._camera.fov_deg))
+        mount = carla_mod.Transform(carla_mod.Location(x=CAMERA_X_M, z=CAMERA_Z_M),
+                                    carla_mod.Rotation(pitch=CAMERA_PITCH_DEG))
+        sensor = self._world.spawn_actor(blueprint, mount, attach_to=self.ego)
+        frames: queue.Queue = queue.Queue()
+        sensor.listen(frames.put)
+        self._sensors[name] = (sensor, frames)
+        self._actors.append(sensor)
+
+    @property
+    def world_to_rgb_camera(self) -> np.ndarray:
+        return np.array(self._sensors["rgb"][0].get_transform().get_inverse_matrix())
+
+    def tick(self) -> dict[str, carla.Image]:
+        """Advance one step and return each camera's image of that exact frame, by camera name."""
+        frame = self._world.tick()
+        images = {}
+        for name, (_sensor, frames) in self._sensors.items():
+            image = frames.get(timeout=SENSOR_TIMEOUT_S)
+            while image.frame != frame:  # drop images of earlier frames
+                image = frames.get(timeout=SENSOR_TIMEOUT_S)
+            images[name] = image
+        return images
+
+    def close(self) -> None:
+        carla_mod = load_carla()
+        for sensor, _frames in self._sensors.values():
+            sensor.stop()
+        self._client.apply_batch([carla_mod.command.DestroyActor(a) for a in self._actors])
+        self._sensors, self._actors = {}, []
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+# --------------------------------------------------------------------------- output files
+
+class ClipWriter:
+    """One split in the TuSimple layout: clip folders, the label line of frame 20, and a meta line per clip."""
+
+    def __init__(self, out: Path, split: str, drive: str) -> None:
+        self.split_dir = out / ("train_set" if split == "train" else "test_set")
+        self.label_path = self.split_dir / "label_data_carla.json" if split == "train" else out / "test_label.json"
+        self.meta_path = out / f"{split}_meta.jsonl"
+        self._drive = drive
+        self._drive_dir = self.split_dir / "clips" / drive
+        self._drive_dir.mkdir(parents=True, exist_ok=True)
+        self._next = sum(1 for p in self._drive_dir.iterdir() if p.is_dir())  # continue numbering across runs
+
+    def new_clip(self) -> Path:
+        clip_dir = self._drive_dir / f"{self._next:05d}"
+        clip_dir.mkdir(exist_ok=True)
+        return clip_dir
+
+    def keep(self, clip_dir: Path, lanes: list[list[int]], meta: dict[str, Any]) -> str:
+        raw_file = f"clips/{self._drive}/{clip_dir.name}/{FRAMES_PER_CLIP}.jpg"
+        self._append(self.label_path, {"lanes": lanes, "h_samples": list(H_SAMPLES), "raw_file": raw_file})
+        self._append(self.meta_path, {"raw_file": raw_file, **meta})
+        self._next += 1
+        return raw_file
+
+    @staticmethod
+    def discard(clip_dir: Path) -> None:
+        shutil.rmtree(clip_dir)
+
+    @staticmethod
+    def _append(path: Path, record: dict[str, Any]) -> None:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+
+# --------------------------------------------------------------------------- collection
+
+def semantic_tags(image: carla.Image, camera: CameraModel) -> np.ndarray:
+    """Tag image (H, W) from CARLA's BGRA semantic image (the tag is in the R channel)."""
+    return np.frombuffer(image.raw_data, dtype=np.uint8).reshape(camera.height, camera.width, 4)[:, :, 2]
+
+
+def label_lanes(world_map: carla.Map, scene: Scene, camera: CameraModel) -> list[list[int]]:
+    world_to_camera = scene.world_to_rgb_camera
+    lines = lane_boundaries(world_map, scene.ego.get_location())
+    return usable_lanes([sample_rows(camera.project(line, world_to_camera), camera.width)
+                         for line in lines if len(line) > 1])
+
+
+def collect_clips(world: carla.World, scene: Scene, writer: ClipWriter, camera: CameraModel, clips: int,
+                  gap_s: float, town: str, seed: int) -> tuple[int, int]:
+    """Drive, record 20-frame clips and label their last frame; returns (saved, attempts)."""
+    carla_mod = load_carla()
+    world_map = world.get_map()
+    for _ in range(WARMUP_TICKS):
+        scene.tick()
+    saved = attempts = 0
+    while saved < clips and attempts < clips * MAX_ATTEMPTS_PER_CLIP:
+        attempts += 1
+        weather = WEATHERS[(saved + seed) % len(WEATHERS)]
+        world.set_weather(getattr(carla_mod.WeatherParameters, weather))
+        for _ in range(round(gap_s * FPS)):
+            scene.tick()
+        clip_dir = writer.new_clip()
+        for index in range(1, FRAMES_PER_CLIP + 1):
+            images = scene.tick()
+            images["rgb"].save_to_disk(str(clip_dir / f"{index}.jpg"))
+        lanes = label_lanes(world_map, scene, camera)  # camera pose of frame 20, the labelled one
+        if len(lanes) < MIN_LANES:
+            writer.discard(clip_dir)
+            continue
+        occluded = occluded_fraction(semantic_tags(images["sem"], camera), lanes)
+        writer.keep(clip_dir, lanes, {"town": town, "weather": weather, "traffic": scene.npc_count,
+                                      "occluded_fraction": round(occluded, 4),
+                                      "speed_kmh": round(3.6 * scene.ego.get_velocity().length(), 1)})
+        saved += 1
+        print(f"clip {clip_dir.name}: {len(lanes)} lanes, weather {weather}, occluded {occluded:.0%}", flush=True)
+    return saved, attempts
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--town", default="Town04")
@@ -130,117 +364,20 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=1)
-    args = ap.parse_args()
-    random.seed(args.seed)
+    return ap.parse_args(argv)
 
-    client = carla.Client(args.host, args.port)
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    carla_mod = load_carla()
+    client = carla_mod.Client(args.host, args.port)
     client.set_timeout(60.0)
-    world = client.get_world()
-    if not world.get_map().name.endswith(args.town):
-        world = client.load_world(args.town)
-    world_map = world.get_map()
-    settings = world.get_settings()
-    # fixed_delta_seconds is None in asynchronous mode, which carla.WorldSettings(...) rejects: keep the values
-    original = (settings.synchronous_mode, settings.fixed_delta_seconds, settings.no_rendering_mode)
-    settings.synchronous_mode, settings.fixed_delta_seconds = True, 1.0 / FPS
-    world.apply_settings(settings)
-    tm = client.get_trafficmanager()
-    tm.set_synchronous_mode(True)
-    tm.set_random_device_seed(args.seed)
-
-    split_dir = args.out / ("train_set" if args.split == "train" else "test_set")
-    label_path = split_dir / "label_data_carla.json" if args.split == "train" else args.out / "test_label.json"
-    meta_path = args.out / f"{args.split}_meta.jsonl"
-    split_dir.mkdir(parents=True, exist_ok=True)
-    k = intrinsics()
-    actors = []
-    try:
-        library = world.get_blueprint_library()
-        spawns = world_map.get_spawn_points()
-        random.shuffle(spawns)
-        ego = world.spawn_actor(random.choice(library.filter("vehicle.lincoln.mkz_2020")), spawns[0])
-        actors.append(ego)
-        for sp in spawns[1:args.traffic + 1]:
-            bp = random.choice([b for b in library.filter("vehicle.*") if int(b.get_attribute("number_of_wheels")) == 4])
-            npc = world.try_spawn_actor(bp, sp)
-            if npc:
-                npc.set_autopilot(True, tm.get_port())
-                actors.append(npc)
-        ego.set_autopilot(True, tm.get_port())
-        tm.ignore_lights_percentage(ego, 100.0)
-
-        mount = carla.Transform(carla.Location(x=1.0, z=1.5), carla.Rotation(pitch=-3.0))
-        cams = {}
-        for name, kind in (("rgb", "sensor.camera.rgb"), ("sem", "sensor.camera.semantic_segmentation")):
-            bp = library.find(kind)
-            bp.set_attribute("image_size_x", str(W))
-            bp.set_attribute("image_size_y", str(H))
-            bp.set_attribute("fov", str(FOV))
-            cam = world.spawn_actor(bp, mount, attach_to=ego)
-            q: queue.Queue = queue.Queue()
-            cam.listen(q.put)
-            cams[name] = (cam, q)
-            actors.append(cam)
-
-        def tick() -> tuple[carla.Image, carla.Image]:
-            frame = world.tick()
-            out = []
-            for _cam, q in cams.values():
-                while True:
-                    img = q.get(timeout=30.0)
-                    if img.frame == frame:
-                        out.append(img)
-                        break
-            return out[0], out[1]
-
-        drive = f"{args.town}-s{args.seed}"
-        existing = len(list((split_dir / "clips" / drive).glob("*"))) if (split_dir / "clips" / drive).exists() else 0
-        saved, attempts = 0, 0
-        for _ in range(40):  # let the cars start moving
-            tick()
-        while saved < args.clips and attempts < args.clips * 4:
-            attempts += 1
-            weather = WEATHERS[(saved + args.seed) % len(WEATHERS)]
-            world.set_weather(getattr(carla.WeatherParameters, weather))
-            for _ in range(int(args.gap_s * FPS)):
-                tick()
-            clip = f"{existing + saved:05d}"
-            clip_dir = split_dir / "clips" / drive / clip
-            clip_dir.mkdir(parents=True, exist_ok=True)
-            for i in range(1, FRAMES_PER_CLIP + 1):
-                rgb, sem = tick()
-                rgb.save_to_disk(str(clip_dir / f"{i}.jpg"))
-            # label the last frame (20) with the camera pose of that frame
-            lines = boundary_polylines(world_map, ego.get_location())
-            lanes = [sample_rows(project(pl, cams["rgb"][0], k)) for pl in lines if len(pl) > 1]
-            lanes = [xs for xs in lanes if sum(x >= 0 for x in xs) >= 5]
-            if len(lanes) < 2:
-                for f in clip_dir.iterdir():
-                    f.unlink()
-                clip_dir.rmdir()
-                continue
-            tags = np.frombuffer(sem.raw_data, dtype=np.uint8).reshape(H, W, 4)[:, :, 2]  # BGRA: tag in R
-            pts = [(x, y) for xs in lanes for x, y in zip(xs, H_SAMPLES, strict=True) if x >= 0]
-            occluded = float(np.mean([np.isin(tags[y, x], OCCLUDERS) for x, y in pts]))
-            raw = f"clips/{drive}/{clip}/20.jpg"
-            with open(label_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"lanes": lanes, "h_samples": H_SAMPLES, "raw_file": raw}) + "\n")
-            with open(meta_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps({"raw_file": raw, "town": args.town, "weather": weather,
-                                     "traffic": len(actors) - 3, "occluded_fraction": round(occluded, 4),
-                                     "speed_kmh": round(3.6 * ego.get_velocity().length(), 1)}) + "\n")
-            saved += 1
-            print(f"clip {clip}: {len(lanes)} lanes, weather {weather}, occluded {occluded:.0%}", flush=True)
-        print(f"saved {saved} clips in {split_dir} (attempts {attempts})")
-    finally:
-        for cam, _ in cams.values() if "cams" in locals() else []:
-            cam.stop()
-        client.apply_batch([carla.command.DestroyActor(a) for a in actors])
-        tm.set_synchronous_mode(False)
-        restore = world.get_settings()
-        restore.synchronous_mode, restore.fixed_delta_seconds, restore.no_rendering_mode = original
-        world.apply_settings(restore)
-        time.sleep(0.5)
+    camera = CameraModel()
+    writer = ClipWriter(args.out, args.split, drive=f"{args.town}-s{args.seed}")
+    with synchronous_world(client, args.town, args.seed) as (world, traffic_manager), \
+            Scene(client, world, traffic_manager, camera, args.traffic, random.Random(args.seed)) as scene:
+        saved, attempts = collect_clips(world, scene, writer, camera, args.clips, args.gap_s, args.town, args.seed)
+    print(f"saved {saved} clips in {writer.split_dir} (attempts {attempts})")
 
 
 if __name__ == "__main__":

@@ -46,6 +46,21 @@ python -m tac_ufld validate-dataset --dataset tusimple   # overlays: check the l
 then enable `tusimple` in `configs/datasets.yaml` (or copy `configs/tusimple.yaml` to a
 `carla.yaml` with its own output folder) and run as for the other datasets.
 
+## Design
+
+| Part | Responsibility | Tested |
+|---|---|---|
+| `CameraModel`, `sample_rows`, `occluded_fraction`, `usable_lanes` | pinhole projection, TuSimple row sampling, occlusion share: pure NumPy, no CARLA import | `tests/test_carla_collect.py` |
+| `lane_boundaries` | lane edges from the CARLA road map (waypoints) | on the simulator |
+| `synchronous_world` | synchronous mode at 20 Hz; restores the previous settings on exit, even after an error | on the simulator |
+| `Scene` | ego car, NPC traffic, RGB and semantic cameras; destroys every actor it spawned, also when a spawn fails | on the simulator |
+| `ClipWriter` | TuSimple file layout, label and meta lines, clip numbering across runs | `tests/test_carla_collect.py` |
+| `collect_clips`, `main` | compose the parts | on the simulator |
+
+The script was smoke-tested on 2026-10-02 (3 clips, labels checked on overlays) and refactored on 2026-10-04
+into the parts above (same output format). **Re-run the 3-clip smoke test before the first real collection**:
+the refactored simulator code has not run against CARLA yet (the GPU was busy with OpenLane).
+
 ## What the labels are (and are not)
 
 - Geometric ground truth from the CARLA map: the boundaries of the ego lane and the outer
