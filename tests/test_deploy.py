@@ -34,6 +34,8 @@ def test_export_and_onnxruntime_match_pytorch(tmp_path, variant):
     manifest = export_model(loaded, tmp_path / "deploy")
     spec = VARIANTS[variant]
     expected = {"encoder", "head", "clip"} if spec.temporal else {"model"}
+    if getattr(loaded.model, "recurrent", False) and spec.history == "real":
+        expected.add("step")  # carried-state update (streaming mode "carry")
     assert set(manifest["graphs"]) == expected
     assert (manifest["temporal_state"] is not None) == spec.temporal
     saved = json.loads((tmp_path / "deploy" / "deployment.json").read_text(encoding="utf-8"))

@@ -100,7 +100,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--port", type=int, default=8501)
     p.add_argument("--headless", action="store_true")
 
-    p = sub.add_parser("robustness", help="held-out lane F1 with a degraded current frame (history clean)")
+    p = sub.add_parser("robustness", help="held-out lane F1 with degraded frames: current only (history clean), "
+                                          "persistent (whole clip) and held-out corruption types")
     p.add_argument("--runs", nargs="+", required=True, help="finished run folders (e.g. results/elas_pilot_v2)")
     p.add_argument("--seed", type=int, default=2026, help="seed of the per-frame degradations")
     p.add_argument("--device", default="auto")
@@ -470,7 +471,8 @@ def cmd_robustness(args) -> int:
     device = _device(args.device)
     for run in args.runs:
         summary = evaluate_run(Path(run), device, seed=args.seed, workers=args.workers)
-        overall = summary[summary["op"] == "all"][["variant", "input", "clean_lane_f1", "lane_f1", "drop_vs_clean"]]
+        overall = summary[summary["op"] == "all"][["protocol", "variant", "input", "clean_lane_f1", "lane_f1",
+                                                   "drop_vs_clean"]]
         print()
         print(run)
         print(overall.round(3).to_string(index=False))

@@ -76,9 +76,11 @@ def test_culane_frame_stride_and_temporal_step(culane_root):
     assert adapter.frame_path(rec.sequence, 180 - 30) is None       # step 30 does not (old config value)
 
 
-def test_culane_config_uses_supervisor_temporal_step():
+def test_culane_config_temporal_step():
+    # 2026-10-23: 30 = 1 s, the shortest history CULane stores (90 = 3 s in every driver, the notebook value);
+    # docs/PLAN_CULANE_2026-10-23.md section 2, item 10
     cfg = load_config(PROJECT_ROOT / "configs" / "culane.yaml")
-    assert cfg.data.temporal_step == 90 and cfg.requires_confirmation
+    assert cfg.data.temporal_step == 30 and cfg.requires_confirmation
 
 
 # ---------------------------------------------------------------- TuSimple
@@ -199,5 +201,9 @@ def test_validate_dataset_passes_on_fixtures(name, maker, tmp_path):
     report = validate_dataset(cfg, tmp_path / "out", n_overlays=2)
     assert report["ok"], report["problems"]
     assert len(list((tmp_path / "out" / "overlays").glob("*.png"))) == 2
-    if name == "culane":
-        assert report["temporal_step_multiple_of_all_strides"]
+    if name == "culane":   # step 30: the 90-frame fixture clip has no history -> warning, not a problem
+        assert not report["temporal_step_multiple_of_all_strides"] and report["warnings"]
+        cfg90 = load_config(PROJECT_ROOT / "configs" / "culane.yaml", {"data.root": str(root), "data.temporal_step": 90,
+                                                                    "data.split.purge_frames": 180})
+        report90 = validate_dataset(cfg90, tmp_path / "out90", n_overlays=0)
+        assert report90["ok"] and report90["temporal_step_multiple_of_all_strides"] and not report90["warnings"]

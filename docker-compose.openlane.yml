@@ -1,0 +1,71 @@
+# OpenLane runs as self-restarting containers (the code is copied into the image at build time, so edits made to
+# the working tree during a run do not change it).
+#
+#   openlane-7models  local subset (95 segments), seeds 1-3          -> results/openlane_7models   (stopped 2026-10-20)
+#   openlane-full     full OpenLane after the download, seeds 1-3    -> results/openlane_full_7models
+#
+#   docker compose -f docker-compose.openlane.yml up -d --build openlane-full   # build + start one service
+#   docker logs -f tac-ufld-openlane_full_7models                               # follow progress
+#   docker compose -f docker-compose.openlane.yml stop openlane-full            # pause on purpose
+#   docker compose -f docker-compose.openlane.yml start openlane-full           # continue (--resume)
+#
+# After a shutdown, Docker Desktop restarts a running service at login (restart: unless-stopped) and the run
+# resumes from the last finished epoch. DONE.txt appears in the results folder when a run has finished.
+name: tac-ufld-openlane
+
+x-openlane: &openlane
+  build:
+    context: .
+    args:
+      TORCH_INDEX: https://download.pytorch.org/whl/cu126
+  image: tac-ufld:openlane-7models
+  restart: unless-stopped
+  volumes:
+    - ${OPENLANE_HOST_DIR:-../../datasets/OpenLane}:/data/openlane:ro
+    - ./results:/app/results
+    - torch-cache:/cache/torch
+  shm_size: "4gb"
+  healthcheck:
+    disable: true          # the image's check probes the web UI, which these services do not run
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  command: ["sh", "scripts/docker/openlane_run.sh"]
+
+services:
+  openlane-7models:
+    <<: *openlane
+    container_name: tac-ufld-openlane-7models
+    environment:
+      RUN_NAME: openlane_7models
+      OPENLANE_ROOT: /data/openlane
+      TAC_UFLD_RESULTS: /app/results
+      PYTHONUTF8: "1"
+
+  openlane-full:
+    <<: *openlane
+    container_name: tac-ufld-openlane_full_7models
+    # Since 2026-10-22 the labels and 480x320 image copies live on the Linux side (volume openlane-local, filled
+    # once by scripts/docker/fill_openlane_volume.sh); reading 1920x1280 JPEGs and ~200k JSON files through the
+    # Windows bind mount made the run I/O-bound. The originals stay mounted read-only at images/ (the reader
+    # checks one image size per split; a missing copy falls back to the original).
+    volumes:
+      - ${OPENLANE_HOST_DIR:-../../datasets/OpenLane}:/data/openlane:ro
+      - openlane-local:/data/openlane_local
+      - ${OPENLANE_HOST_DIR:-../../datasets/OpenLane}/images:/data/openlane_local/images:ro
+      - ./results:/app/results
+      - torch-cache:/cache/torch
+    environment:
+      RUN_NAME: openlane_full_7models
+      OPENLANE_ROOT: /data/openlane_local
+      TAC_UFLD_RESULTS: /app/results
+      PYTHONUTF8: "1"
+
+volumes:
+  torch-cache:
+  openlane-local:
+    external: true         # docker volume create openlane-local

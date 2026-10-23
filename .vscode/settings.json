@@ -4,5 +4,17 @@
   "python.testing.pytestArgs": ["tests", "-q"],
   "python.analysis.extraPaths": ["src"],
   "files.exclude": {"**/__pycache__": true, "**/.pytest_cache": true},
-  "search.exclude": {"results": true, "site": true, "dist": true, ".venv": true}
+  "search.exclude": {
+    "results": true,
+    "site": true,
+    "dist": true,
+    ".venv": true
+  },
+  "python-envs.pythonProjects": [
+    {
+      "path": ".",
+      "envManager": "ms-python.python:system",
+      "packageManager": "ms-python.python:pip"
+    }
+  ]
 }

@@ -1,0 +1,65 @@
+# CULane, reproduction gate of the baseline (2026-10-23): UFLD v1 ResNet-18 with EXACTLY the article's recipe
+# (Qin et al., ECCV 2020; cfzd/Ultra-Fast-Lane-Detection configs/culane.py). Target: test F1 68.4 (+/- 0.5)
+# with the CULane protocol (IoU 0.5, 30 px lines at 1640x590, spline-interpolated lanes). One seed, ~21 h on an
+# RTX 3050, ~3 h on an A100. If this does not reproduce, no comparison with UFLD's published numbers is valid.
+#
+#   python run_experiment.py --plan reproduction
+
+name: culane_ufld_reproduction
+output_dir: results
+device: auto
+requires_confirmation: true
+
+data:
+  dataset: culane
+  root: "${CULANE_ROOT:-../../datasets/CULane}"
+  img_h: 288
+  img_w: 800
+  num_lanes: 4
+  num_row_anchors: 18
+  row_anchor_range: [0.4201, 0.9965]
+  griding_num: 200
+  num_frames: 1
+  num_workers: 6
+  augmentation:
+    enabled: true                 # needed for the geometric part
+    prob: 0.0                     # no photometric augmentation (UFLD has none)
+    erasing_prob: 0.0
+    frame_dropout_prob: 0.0
+    current_frame_prob: 0.0       # no degradation
+    geometric:                    # RandomRotate(6), RandomUDoffsetLABEL(100), RandomLROffsetLABEL(200)
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.122
+      translate_y: 0.169
+  split:
+    max_train_frames: null
+
+model:
+  variants: [ufld_baseline]
+  pretrained: true
+  ufld_aux: true
+
+train:
+  seeds: [1]
+  epochs: 50
+  early_stopping_patience: 0
+  batch_size: 32
+  optimizer: sgd
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  scheduler: multi
+  multi_steps: [25, 38]
+  warmup_iters: 695
+  amp: true
+
+hpo:
+  enabled: false
+
+evaluation:
+  iou_thresholds: [0.5, 0.35]
+  lane_interpolation: auto
+  postprocess_grid: {threshold: [0.5], min_points: [2], poly_degree: [0]}
+  workers: 6

@@ -1,0 +1,115 @@
+# FULL OpenLane (after scripts/download_openlane.py --annotations), 7 decided models, seeds 1-7 (<= 30 epochs, patience 8 since 2026-10-22). Derived from
+# configs/openlane_7models.yaml (2026-10-20). Sized for one 6 GB RTX 3050, about 4-5 days: the whole dataset
+# (~157k training frames x 7 models x 30 epochs) would take about 3 weeks PER SEED here. The caps sample training
+# frames over every training segment and keep whole test segments; set them to null on a cluster.
+# Run: docker-compose.openlane.yml, service openlane-full (started by scripts/docker/openlane_full_pipeline.ps1).
+name: openlane_full_7models
+output_dir: results
+device: auto
+requires_confirmation: true
+description: 'Full OpenLane (all 798 training / 202 validation segments), 7 decided
+  models, seeds 1-7, sized for one 6 GB RTX 3050: 15k training frames sampled over
+  all training segments, 2k val, 10k test frames (whole official-validation segments
+  in a seeded random order, about 50 of 202), <= 30 epochs, patience 8.'
+data:
+  dataset: openlane
+  root: ${OPENLANE_ROOT}
+  img_h: 320
+  img_w: 480
+  num_lanes: 4
+  num_row_anchors: 36
+  row_anchor_range:
+  - 0.4
+  - 0.995
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1
+  num_workers: 2   # was 4: four forked loader workers ran the 7.7 GB Docker VM out of memory (killed 3x, 2026-10-21)
+  jpeg_draft: true
+  # 480x320 copies of every image (scripts/cache_images.py), in the Docker volume openlane-local: the full
+  # dataset read through the Windows bind mount made the run I/O-bound (2026-10-22). Docker-only path; set it to
+  # null to read the originals (outside docker-compose.openlane.yml).
+  image_cache: /data/openlane_local/cache
+  skip_unattributed_frames: true
+  augmentation:
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale:
+      - 0.9
+      - 1.1
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale:
+      - 0.85
+      - 1.0
+    current_frame_prob: 0.3
+    current_frame_persistent_share: 0.33
+  split:
+    split_seed: 2026
+    val_strategy: sequences
+    purge_frames: 2
+    val_fraction: 0.1
+    seen_test_fraction: 0.0
+    cap_by_sequence: true
+    max_train_frames: 15000
+    max_val_frames: 2000
+    max_test_frames: 10000
+model:
+  variants:
+  - ufld_baseline
+  - ufld_v07
+  - lite_baseline
+  - lite_baseline_ct
+  - lite_tsm
+  - lite_tsm_static
+  - lite_v06
+  backbone: '18'
+  pretrained: true
+train:
+  # 2026-10-22: 7 seeds (the declared Holm-corrected comparisons need >= 7 paired seeds) and up to 30 epochs
+  # with patience 8: with a 12-epoch cap the single-frame baselines were cut off (on the 95-segment subset
+  # UFLD v1 peaked at epoch 16 and lite_baseline still improved at epoch 30).
+  seeds:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  epochs: 30
+  batch_size: 8
+  optimizer: adam
+  lr: 0.0004
+  lr_fusion: 0.0005
+  weight_decay: 0.0001
+  scheduler: cos
+  warmup_iters: 100
+  grad_clip_norm: 1.0
+  early_stopping_patience: 8
+  amp: true
+  lambda_temporal: 0.01
+  lambda_coord: 0.35
+hpo:
+  enabled: false
+evaluation:
+  primary_pairs:
+  - - lite_tsm
+    - lite_baseline_ct
+  - - ufld_v07
+    - ufld_baseline
+  postprocess_grid:
+    threshold:
+    - 0.4
+    - 0.5
+    min_points:
+    - 2
+    - 3
+    poly_degree:
+    - 0
+  latency_runs: 50
+  n_visual_examples: 12
+  workers: 4

@@ -33,7 +33,7 @@ from tac_ufld.evaluation.tracking import sequence_order
 def carry_predictions(model: nn.Module, dataset: TemporalLaneDataset, adapter, device: str, img_w: int,
                       amp: bool, temporal_step: int, batch_size: int = 16) -> Predictions:
     if not getattr(model, "recurrent", False):
-        raise TypeError("carry-state evaluation needs a recurrent model (ufld_v07, lite_v06)")
+        raise TypeError("carry-state evaluation needs a recurrent model (ufld_v07, lite_v06, lite_v06_occ, lite_tsm)")
     model.eval()
     records, cfg = dataset.records, dataset.cfg
     n = len(records)

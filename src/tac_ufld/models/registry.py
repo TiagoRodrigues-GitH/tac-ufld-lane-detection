@@ -38,7 +38,8 @@ class VariantSpec:
     temporal_consistency: bool = False
     flow_smoothness_weight: float = 0.0
     origin: str = ""
-    fusion: str = ""                  # weighted | gated | warp | aligned | recurrent ("" = single frame)
+    fusion: str = ""                  # weighted | gated | warp | aligned | recurrent | recurrent_occ | attention
+                                      # | shift (in-backbone temporal shift) ("" = single frame)
     # Equal-training control: the single-frame model that received the SAME
     # extra training from the same starting checkpoint (``*_baseline_ct``).
     # A temporal gain over it cannot come from more epochs.
@@ -49,6 +50,10 @@ class VariantSpec:
     # The capacity-control twin of a temporal model (``*_static``): a gain
     # over it cannot come from the extra fusion layers.
     static_reference: str | None = None
+    # Knowledge-distillation teacher (a trained variant of the same run and seed, e.g. ufld_v07); the student is
+    # trained with the extra term of ``train.distill_*``. Its clips have ``num_frames`` frames even when the
+    # student is single-frame, because the teacher needs the history.
+    teacher: str | None = None
 
 
 VARIANTS: dict[str, VariantSpec] = {
@@ -93,6 +98,13 @@ VARIANTS: dict[str, VariantSpec] = {
         origin="v0.4: ConvGRU over UFLD layer-4 features, zero-initialised residual read-out",
         fusion="recurrent", budget_reference="ufld_baseline_ct",
     ),
+    "ufld_v08": VariantSpec(
+        "ufld_v08", "UFLD v0.8 temporal attention", "ufld", True, "ufld_baseline", "ufld_baseline",
+        temporal_consistency=True,
+        origin="2026-10-05: cross-frame attention over UFLD layer-4 features (TGC-Net / LaneTCA family), "
+               "zero-initialised residual read-out",
+        fusion="attention", budget_reference="ufld_baseline_ct",
+    ),
     "lite_baseline": VariantSpec(
         "lite_baseline", "Lite single-frame", "lite", False, None, None,
         origin="ELAS script: SingleFrameUFLDLikeModel (LightweightBackbone + LanePixelHead)",
@@ -120,6 +132,46 @@ VARIANTS: dict[str, VariantSpec] = {
         origin="v0.4: ConvGRU over lite backbone features, zero-initialised residual read-out",
         fusion="recurrent", budget_reference="lite_baseline_ct",
     ),
+    "lite_v07": VariantSpec(
+        "lite_v07", "Lite v0.7 temporal attention", "lite", True, "lite_baseline", "lite_baseline",
+        temporal_consistency=True,
+        origin="2026-10-05: the cross-frame attention of UFLD v0.8 on lite backbone features",
+        fusion="attention", budget_reference="lite_baseline_ct",
+    ),
+    "lite_v06_occ": VariantSpec(
+        "lite_v06_occ", "Lite v0.6 occlusion-gated ConvGRU", "lite", True, "lite_baseline", "lite_baseline",
+        temporal_consistency=True,
+        origin="2026-10-19: lite v0.6 with the GRU update gate multiplied by a learned per-cell visibility of the "
+               "incoming frame (occlusion-aware memory write, the idea of OMR / SIGMA-Lane)",
+        fusion="recurrent_occ", budget_reference="lite_baseline_ct",
+    ),
+    "lite_tsm": VariantSpec(
+        "lite_tsm", "Lite TSM (online temporal shift)", "lite", True, "lite_baseline", "lite_baseline",
+        temporal_consistency=True,
+        origin="2026-10-19: online temporal shift (Lin et al., TSM, ICCV 2019) of 1/8 of the channels in lite "
+               "backbone blocks 2-4; zero extra parameters and MACs",
+        fusion="shift", budget_reference="lite_baseline_ct", static_reference="lite_tsm_static",
+    ),
+    "lite_tsm_static": VariantSpec(
+        "lite_tsm_static", "Lite TSM static history (capacity control)", "lite", True, "lite_baseline",
+        "lite_baseline", temporal_consistency=True,
+        origin="2026-10-19 control: lite TSM with every history frame replaced by the current frame",
+        fusion="shift", budget_reference="lite_baseline_ct", history="current",
+    ),
+    "lite_tsm_kd": VariantSpec(
+        "lite_tsm_kd", "Lite TSM distilled from UFLD v0.7", "lite", True, "lite_tsm", "lite_baseline",
+        temporal_consistency=True,
+        origin="2026-10-19: lite_tsm trained with knowledge distillation from the UFLD v0.7 temporal teacher "
+               "(Hinton et al. 2015); reference lite_tsm isolates the distillation",
+        fusion="shift", budget_reference="lite_baseline_ct", teacher="ufld_v07",
+    ),
+    "lite_baseline_kd": VariantSpec(
+        "lite_baseline_kd", "Lite single-frame distilled from UFLD v0.7", "lite", False, "lite_baseline",
+        "lite_baseline",
+        origin="2026-10-19: the single-frame lite model learns from the temporal UFLD v0.7 teacher: temporal "
+               "knowledge at zero runtime cost; same continued-training budget as lite_baseline_ct",
+        budget_reference="lite_baseline_ct", teacher="ufld_v07",
+    ),
 }
 
 # Short labels for tables, plots and the results page (display_name is longer).
@@ -128,6 +180,9 @@ SHORT_LABELS = {
     "ufld_v03": "UFLD v0.3 gated", "ufld_v04": "UFLD v0.4 coord", "ufld_v06": "UFLD v0.6 aligned",
     "ufld_v07": "UFLD v0.7 ConvGRU", "lite_baseline": "Lite baseline", "lite_baseline_ct": "Lite baseline +CT",
     "lite_v05": "Lite v0.5 warped", "lite_v05_static": "Lite v0.5 static", "lite_v06": "Lite v0.6 ConvGRU",
+    "ufld_v08": "UFLD v0.8 attention", "lite_v07": "Lite v0.7 attention",
+    "lite_v06_occ": "Lite v0.6 occ-gated", "lite_tsm": "Lite TSM", "lite_tsm_static": "Lite TSM static",
+    "lite_tsm_kd": "Lite TSM +KD", "lite_baseline_kd": "Lite baseline +KD",
 }
 
 
@@ -149,9 +204,10 @@ def training_order(keys: list[str], cfg: ExperimentConfig) -> list[str]:
     def visit(key: str) -> None:
         if key in ordered:
             return
-        dep = resolve_spec(key, cfg).warm_start
-        if dep:
-            visit(dep)
+        spec = resolve_spec(key, cfg)
+        for dep in (spec.warm_start, spec.teacher):  # a teacher is trained before its students
+            if dep:
+                visit(dep)
         ordered.append(key)
 
     for key in keys:
@@ -162,8 +218,10 @@ def training_order(keys: list[str], cfg: ExperimentConfig) -> list[str]:
 def build_model(key: str, cfg: ExperimentConfig, pretrained: bool | None = None) -> nn.Module:
     """Instantiate a variant. ``pretrained`` defaults to the config value;
     warm-started variants skip the ImageNet download (weights are overwritten)."""
-    from tac_ufld.models.fusion import AlignedResidualFusion, ConvGRUFusion
-    from tac_ufld.models.lite import LanePixelHead, LightweightBackbone, LiteSingleFrame, LiteTemporal
+    from tac_ufld.models.fusion import (
+        AlignedResidualFusion, ConvGRUFusion, OcclusionGatedConvGRUFusion, TemporalAttentionFusion,
+    )
+    from tac_ufld.models.lite import LanePixelHead, LightweightBackbone, LiteSingleFrame, LiteTemporal, LiteTSM
     from tac_ufld.models.ufld import (
         GatedTemporalFusion, TemporalWeightedFusion, UFLDNet, UFLDSingleFrame, UFLDTemporal,
     )
@@ -176,7 +234,7 @@ def build_model(key: str, cfg: ExperimentConfig, pretrained: bool | None = None)
     if spec.family == "ufld":
         ufld = UFLDNet(d.num_lanes, d.num_row_anchors, d.griding_num, d.img_h, d.img_w,
                        backbone=m.backbone, pretrained=pretrained, in_channels=in_channels,
-                       head_dropout=m.head_dropout, head_hidden=m.ufld_head_hidden)
+                       head_dropout=m.head_dropout, head_hidden=m.ufld_head_hidden, aux=m.ufld_aux)
         if not spec.temporal:
             return UFLDSingleFrame(ufld)
         channels = 512
@@ -186,14 +244,30 @@ def build_model(key: str, cfg: ExperimentConfig, pretrained: bool | None = None)
             fusion = AlignedResidualFusion(channels, d.num_frames, hidden=64, max_disp=m.aligned_max_disp)
         elif spec.fusion == "recurrent":
             fusion = ConvGRUFusion(channels, m.recurrent_hidden)
+        elif spec.fusion == "attention":
+            fusion = TemporalAttentionFusion(channels, d.num_frames)
         else:
             fusion = TemporalWeightedFusion(d.num_frames)
         return UFLDTemporal(ufld, fusion)
     backbone = LightweightBackbone(in_channels, 128, dropout=m.lite_dropout)
-    head = LanePixelHead(128, d.num_lanes, d.num_row_anchors, d.griding_num, dropout=m.lite_head_dropout)
+    anchor_fracs = None
+    if m.lite_anchor_rows == "aligned":  # each anchor reads its own image row (see AnchorRowPool)
+        from tac_ufld.data.targets import make_row_anchors
+
+        anchor_fracs = ((make_row_anchors(d.img_h, d.num_row_anchors, d.row_anchor_range) + 0.5) / d.img_h).tolist()
+    head = LanePixelHead(128, d.num_lanes, d.num_row_anchors, d.griding_num, dropout=m.lite_head_dropout,
+                         anchor_fracs=anchor_fracs)
     if not spec.temporal:
         return LiteSingleFrame(backbone, head)
-    fusion = ConvGRUFusion(backbone.out_channels, m.recurrent_hidden) if spec.fusion == "recurrent" else None
+    if spec.fusion == "shift":  # the temporal pathway is inside the backbone, same layers as lite_baseline
+        return LiteTSM(backbone, head)
+    fusion = None  # lite v0.5: warped residual fusion (LiteTemporal's default)
+    if spec.fusion == "recurrent":
+        fusion = ConvGRUFusion(backbone.out_channels, m.recurrent_hidden)
+    elif spec.fusion == "recurrent_occ":
+        fusion = OcclusionGatedConvGRUFusion(backbone.out_channels, m.recurrent_hidden)
+    elif spec.fusion == "attention":
+        fusion = TemporalAttentionFusion(backbone.out_channels, d.num_frames)
     return LiteTemporal(backbone, head, d.num_frames, history_encoder=m.lite_history_encoder,
                         in_channels=in_channels, dropout=m.lite_dropout, fusion=fusion)
 

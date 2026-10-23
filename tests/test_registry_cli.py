@@ -20,8 +20,9 @@ def _write_registry(path: Path, body: str) -> Path:
 
 def test_shipped_registry_enables_elas_and_openlane():
     reg = load_registry()
-    assert set(reg) == {"elas", "culane", "tusimple", "openlane"}
-    assert [e.name for e in reg.values() if e.enabled] == ["elas", "openlane"]  # OpenLane since 2026-10-01
+    assert set(reg) == {"elas", "culane", "tusimple", "openlane", "openlane_v"}
+    # OpenLane since 2026-10-01, OpenLane-V (RVLD labels) since 2026-10-05
+    assert [e.name for e in reg.values() if e.enabled] == ["elas", "openlane", "openlane_v"]
 
 
 def test_env_expansion(monkeypatch):

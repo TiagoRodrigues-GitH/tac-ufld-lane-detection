@@ -63,12 +63,16 @@ class Trainer:
         writer=None,
         trial=None,
         tag: str = "",
+        teacher: nn.Module | None = None,
     ) -> None:
         self.model, self.spec, self.cfg, self.hp, self.device = model, spec, cfg, hp, device
         self.train_loader, self.val_loader, self.val_records = train_loader, val_loader, val_records
         self.evaluator, self.epochs, self.patience = evaluator, epochs, patience
         self.writer, self.trial, self.tag = writer, trial, tag or spec.key
-        self.loss_fn = VariantLoss(spec, cfg.train.loss, hp, cfg.data.img_w)
+        self.loss_fn = VariantLoss(spec, cfg.train.loss, hp, cfg.data.img_w,
+                                   cfg.train.distill_weight, cfg.train.distill_temperature)
+        # knowledge-distillation teacher: frozen, eval mode (BatchNorm running statistics, no dropout)
+        self.teacher = teacher.eval().requires_grad_(False) if teacher is not None else None
         self.amp = cfg.train.amp and device.startswith("cuda")
         self.selection = cfg.evaluation.selection_metric
         self.val_params = PostprocessParams.from_config(cfg.evaluation.common_postprocess)
@@ -105,13 +109,18 @@ class Trainer:
         t = self.cfg.train
         per_epoch = max(len(self.train_loader), 1)
         total = max(self.epochs * per_epoch, 1)
+        # train.multi_steps are epochs of the full budget (train.epochs, e.g. UFLD's 25 and 38 of 50). A run
+        # with another budget (HPO trials, the fine-tuning of warm-started models) decays at the same
+        # FRACTIONS of its own budget; before 2026-10-23 a 10-epoch HPO trial never reached a decay.
+        scale = self.epochs / max(t.epochs, 1)
+        milestones = [s * scale * per_epoch for s in t.multi_steps]
 
         def factor(it: int) -> float:
             warm = 1.0 if t.warmup_iters <= 0 else min(1.0, 0.1 + 0.9 * it / t.warmup_iters)
             if t.scheduler == "cos":
                 return warm * 0.5 * (1.0 + math.cos(math.pi * min(it, total) / total))
             if t.scheduler == "multi":
-                return warm * 0.1 ** sum(it >= s * per_epoch for s in t.multi_steps)
+                return warm * 0.1 ** sum(it >= m for m in milestones)
             return warm
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
@@ -130,6 +139,9 @@ class Trainer:
             optimizer.zero_grad(set_to_none=True)
             with autocast:
                 outputs = self.model(batch["images"])
+                if self.teacher is not None:
+                    with torch.no_grad():
+                        outputs["teacher_logits"] = self.teacher(batch["images"])["logits"]
                 loss, logs = self.loss_fn(self.model, outputs, batch)
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"{self.tag}: non-finite loss {logs}")
@@ -147,11 +159,18 @@ class Trainer:
         return {f"train_{k}": v / max(n_seen, 1) for k, v in sums.items()}
 
     def fit(self, checkpoint_path: Path | None = None, extra_meta: dict | None = None,
-            resume: bool = False) -> TrainResult:
+            resume: bool = False, evaluate_initial: bool = False) -> TrainResult:
         """Train, keeping the best validation state. With ``train.save_last``
         the full training state is written to ``<checkpoint>.last.pt`` after
         every epoch; ``resume=True`` continues from it (same optimizer,
-        scheduler, AMP scaler, RNG and data-order state)."""
+        scheduler, AMP scaler, RNG and data-order state).
+
+        ``evaluate_initial`` (warm-started models): the starting weights are scored on validation before
+        the first epoch and are the first candidate (epoch 0), so a warm-started model never ends below its
+        starting point on validation. Without it, a control trained further from the baseline (``_ct``) or a
+        temporal model could finish below the baseline it started from, which biases every comparison with
+        that baseline (OpenLane seed 1, 2026-10-23: lite_baseline_ct best 0.386 on validation vs 0.465 for
+        its own starting point)."""
         optimizer = self._optimizer()
         scheduler = self._scheduler(optimizer)
         scaler = torch.amp.GradScaler("cuda", enabled=self.amp)
@@ -172,6 +191,19 @@ class Trainer:
             start_epoch = state["epoch"] + 1
             _restore_rng(state["rng"], self.train_loader)
             LOGGER.info("[%s] resumed from %s after epoch %d", self.tag, last_path.name, state["epoch"])
+        if evaluate_initial and start_epoch == 1 and not history:
+            start = time.time()
+            preds = predict(self.model, self.val_loader, self.device, self.cfg.data.img_w,
+                            amp=self.amp, loss_fn=self.loss_fn)
+            val = self.evaluator.evaluate(preds, self.val_records, self.val_params)
+            best_score, best_loss, best_epoch = val.metrics[self.selection], preds.loss, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+            if checkpoint_path is not None:
+                self._save(checkpoint_path, best_state, 0, best_score, extra_meta)
+            history.append({"epoch": 0, "lr": 0.0, **{f"val_{k}": v for k, v in val.metrics.items()},
+                            "seconds": time.time() - start, "flags": "warm start (before training)"})
+            LOGGER.info("[%s] epoch 00 (warm start, before training)  val_focal=%.4f  val_%s=%.4f",
+                        self.tag, preds.loss, self.selection, best_score)
         for epoch in range(start_epoch, self.epochs + 1):
             if self.patience > 0 and stale >= self.patience:
                 break  # the resumed run had already stopped early

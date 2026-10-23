@@ -42,3 +42,10 @@ datasets:
     config: configs/openlane.yaml
     smoke_config: configs/openlane_smoke.yaml
     description: "OpenLane v1 (2D lanes), 4 attribute slots, Waymo segments"
+
+  openlane_v:
+    enabled: true      # 2026-10-05: OpenLane-V labels (RVLD) + full OpenLane images
+    root: "${OPENLANE_ROOT}"
+    config: configs/openlane_v.yaml
+    smoke_config: configs/openlane_v_smoke.yaml
+    description: "OpenLane-V (Jin et al. 2023), up to 4 ego/alternative lanes, RVLD video protocol"

@@ -94,5 +94,19 @@ class OnnxRuntimeBackend:
             return self.sessions["model"].run(None, {"frame": clip[:, -1]})[0]
         return self.sessions["clip"].run(None, {"clip": clip})[0]
 
+    def step(self, current, state):
+        """Recurrent models: one carried-state update with ``step.onnx`` (``state=None`` = start of a chain)."""
+        if "step" not in self.sessions:
+            raise RuntimeError(f"{self.dir} has no step.onnx (not a recurrent model, or exported before 2026-10-19)")
+        graph = self.manifest["graphs"]["step"]
+        names = [n for n in graph["inputs"] if n.startswith("state_")]
+        if state is None:
+            state = [np.zeros(graph["inputs"][n], dtype=np.float32) for n in names]
+        elif not graph["tuple_state"]:
+            state = [state]
+        outs = self.sessions["step"].run(None, {"current_features": self._f32(current),
+                                                **{n: self._f32(s) for n, s in zip(names, state)}})
+        return outs[0], (tuple(outs[1:]) if graph["tuple_state"] else outs[1])
+
     def synchronize(self) -> None:  # ONNX Runtime calls are synchronous
         return None

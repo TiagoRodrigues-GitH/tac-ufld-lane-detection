@@ -166,7 +166,12 @@ def validate_dataset(cfg: ExperimentConfig, out_dir: Path, n_overlays: int = 24)
     rng = random.Random(0)
     for rec in rng.sample(all_recs, min(n_overlays, len(all_recs))):
         _overlay(rec, cfg, anchors, out_dir / "overlays" / f"{rec.key.replace('/', '_')}.png")
-    problems = []
+    problems, warnings = [], []
+    # History missing BECAUSE the configured step is not a multiple of some clips' stored stride (CULane
+    # *_90frame clips with temporal_step 30) is a known consequence of the choice, reported as a warning; any
+    # other missing history (gaps, a wrong step for every clip) stays a problem (2026-10-23).
+    structural = report.get("temporal_step_multiple_of_all_strides") is False and any(
+        cfg.data.temporal_step % s == 0 for s in report.get("frame_stride_histogram", {}))
     for name, s in report["splits"].items():
         if s["image_size_mismatches"]:
             problems.append(f"{name}: image sizes differ from the declared size")
@@ -178,11 +183,17 @@ def validate_dataset(cfg: ExperimentConfig, out_dir: Path, n_overlays: int = 24)
             problems.append(f"{name}: lane slots out of left-to-right order in "
                             f"{100 * s['lane_order_violation_rate']:.1f}% of frames")
         if cfg.data.num_frames > 1 and s["history_missing_rate"] > 0.05:
-            problems.append(f"{name}: {100 * s['history_missing_rate']:.0f}% of history frames inside the "
-                            f"sequences are missing for temporal_step={cfg.data.temporal_step}")
+            msg = (f"{name}: {100 * s['history_missing_rate']:.0f}% of history frames inside the "
+                   f"sequences are missing for temporal_step={cfg.data.temporal_step}")
+            if structural:
+                warnings.append(msg + " (clips whose stored stride does not divide the step, e.g. CULane "
+                                      "*_90frame drivers: their history falls back to the current frame)")
+            else:
+                problems.append(msg)
     if duplicates:
         problems.append(f"{duplicates} duplicate frame keys")
     report["problems"] = problems
+    report["warnings"] = warnings
     report["ok"] = not problems
     lines = [f"{adapter.name}: {'OK' if report['ok'] else 'PROBLEMS FOUND'}"]
     for name, s in report["splits"].items():
@@ -190,6 +201,7 @@ def validate_dataset(cfg: ExperimentConfig, out_dir: Path, n_overlays: int = 24)
                      f"slot presence={s['slot_present_rate']} order violations={s['lane_order_violations']} "
                      f"history missing={100 * s['history_missing_rate']:.1f}%")
     lines += [f"  problem: {p}" for p in problems]
+    lines += [f"  warning: {w}" for w in warnings]
     report["summary"] = "\n".join(lines)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "validation_report.json").write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")

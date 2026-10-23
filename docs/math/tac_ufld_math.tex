@@ -1,0 +1,347 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage{booktabs,array,longtable}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\impl}[1]{\par\noindent\textcolor{blue!50!black}{\small\textbf{Code:} \texttt{#1}}\par}
+\newcommand{\verif}[1]{\par\noindent\textcolor{green!35!black}{\small\textbf{Verified:} #1}\par}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\theoremstyle{definition}
+\newtheorem{proposition}{Proposition}
+\setlength{\emergencystretch}{3em}
+\sloppy
+
+\title{TAC-UFLD: the mathematics behind every part of the pipeline\\[2pt]
+\large A reference for the article and its defence, mapped to the code}
+\author{Tiago Rodrigues --- UTFPR / Resid\^encia em IA\\ \small companion of the repository \code{tac-ufld-lane-detection}, 2026-10-19}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Each section states the model or procedure as equations, names the file and function that implement it, and
+records how the implementation was checked (unit test, numerical measurement, or derivation). Symbols are
+defined once in Section~\ref{sec:notation}. Results quoted as \emph{pilot} come from 1 seed and 4 epochs and are
+indicative only. \textbf{Resumo:} cada se\c{c}\~ao apresenta as equa\c{c}\~oes, o arquivo/fun\c{c}\~ao que as
+implementa e como a implementa\c{c}\~ao foi verificada.
+\end{abstract}
+
+\tableofcontents
+
+%======================================================================
+\section{Notation and data}\label{sec:notation}
+An input frame $I_t\in[0,1]^{3\times H\times W}$ (model size $H{\times}W=384{\times}512$ for ELAS) at time
+index $t$; a clip $\mathcal{C}_t=(I_{t-(T-1)s},\dots,I_{t-s},I_t)$ with $T$ frames spaced $s$ apart (ELAS:
+$T=3$, $s=2$ at $29.97$\,Hz, i.e.\ $67$ and $133$\,ms of history). $L$ lane slots (ELAS: $L=2$, ego-left and
+ego-right), $A$ row anchors, $G$ horizontal grid cells.
+
+\paragraph{Row anchors.} $y_a=\ell(H-1)+\frac{a}{A-1}(u-\ell)(H-1)$, $a=0,\dots,A-1$, with the band
+$[\ell,u]=[0.59,0.995]$ covering every ELAS region of interest (ROI).
+\impl{data/targets.py: make\_row\_anchors}
+
+\paragraph{ELAS geometry.} Each annotated boundary has four $x$ values at the fixed rows
+$y_k=y_{\mathrm{roi}}+f_k h_{\mathrm{roi}}$, $f_k\in\{0,\tfrac14,\tfrac12,1\}$; the lane is the polyline through
+them, linearly interpolated between rows.
+\verif{a straight-line fit through the four points has a median maximum residual of 1.0--4.6\,px with these
+fractions versus 15.8--22.5\,px with thirds, on all 22 scenes (\code{tests/test\_elas.py}); the lane-centre label
+\code{laneCenter} equals the mean of the two bottom points to 0.00\,px median over 15{,}424 frames.}
+
+%======================================================================
+\section{Target encoding and decoding}
+\paragraph{Encoding.} For slot $l$ and anchor $a$ with the lane at model column $x_{a,l}\in[0,W-1]$,
+\begin{equation}
+c_{a,l}=\operatorname{clip}\Big(\operatorname{round}\Big(\tfrac{x_{a,l}}{W-1}(G-1)\Big),0,G-1\Big),
+\end{equation}
+$c_{a,l}=G$ (``no lane'') where the slot is known but the lane does not cross the anchor, and
+$c_{a,l}=\varnothing$ (ignored) outside the annotated band or for an unknown slot.
+\impl{data/targets.py: encode\_targets, x\_to\_bin}
+
+\paragraph{Decoding (official UFLD).} With logits $\bm z_{a,l}\in\R^{G+1}$,
+\begin{align}
+p_{a,l}(k)&=\softmax(\bm z_{a,l})_k,\qquad \hat e_{a,l}=1-p_{a,l}(G)\quad\text{(existence)},\\
+q_{a,l}(i)&=\softmax(\bm z_{a,l,0:G-1})_i,\qquad
+\hat\imath_{a,l}=\E_q[i]=\textstyle\sum_{i=0}^{G-1} i\,q_{a,l}(i),\qquad \hat x_{a,l}=\hat\imath_{a,l}\tfrac{W-1}{G-1}.
+\end{align}
+The expectation (soft-argmax) gives sub-cell resolution and is differentiable.
+\impl{decoding.py: decode\_logits, expected\_x}
+
+\paragraph{Predictive variance (added 2026-10-19).} The same distribution gives its spread,
+\begin{equation}
+\sigma^2_{a,l}=\Var_q[i]\Big(\tfrac{W-1}{G-1}\Big)^2=\Big(\textstyle\sum_i i^2q(i)-\hat\imath^2\Big)\Big(\tfrac{W-1}{G-1}\Big)^2,
+\end{equation}
+in model px$^2$: small for a confident frame, large when the frame is occluded or blurred.
+\impl{decoding.py: position\_variance; evaluation/predictor.py (Predictions.x\_var)}
+\verif{equals $\sum_i q(i)(i-\hat\imath)^2$ to $10^{-5}$ and is $0$ for a one-hot distribution
+(\code{test\_position\_variance\_matches\_the\_categorical\_formula}).}
+
+%======================================================================
+\section{Geometric augmentation}
+One homography $\bm H\in\R^{3\times3}$ per clip (rotation, scale, translation, crop-zoom, perspective jitter of the
+corners): every frame is warped by $\bm H$, so the motion between frames is kept, and the targets are re-encoded
+from the transformed polyline vertices $\tilde{\bm p}=\pi(\bm H[\bm p;1])$ ($\pi$ = dehomogenisation; a
+homography maps segments to segments, so transforming the vertices is exact). A transformed row may carry ``no
+lane'' only if its visible content lies inside the source ROI, tested by mapping back with $\bm H^{-1}$.
+\impl{data/geometric.py: GeometricAugmenter.sample, encode\_targets\_warped}
+
+%======================================================================
+\section{Networks}
+\subsection{UFLD v1 (baseline)}
+ResNet-18 features $\bm F\in\R^{512\times h\times w}$, $h=\lceil H/32\rceil$, $w=\lceil W/32\rceil$; a $1{\times}1$
+convolution to 8 channels; flattening $\bm f\in\R^{8hw}$; a two-layer head
+\begin{equation}
+\bm z=\bm W_2\,\mathrm{ReLU}(\bm W_1\bm f+\bm b_1)+\bm b_2\in\R^{(G+1)AL},\quad \bm W_1\in\R^{2048\times 8hw}.
+\end{equation}
+The head sees the whole image (global context). Parameters at $384{\times}512$, $A=18$, $G=100$, $L=2$: head
+$8\cdot12\cdot16\cdot2048+2048\cdot101\cdot36\approx10.6$\,M, total 21.8\,M; 7.12\,GMACs.
+\impl{models/ufld.py: UFLDNet; models/resnet.py (torchvision layer-for-layer, strict ImageNet load)}
+
+\subsection{Light model}
+Four stride-2 blocks of two $3{\times}3$ convolutions (32, 64, 96, 128 channels), output stride 16. Receptive field
+by the recursion $r_\ell=r_{\ell-1}+(k_\ell-1)j_{\ell-1}$, $j_\ell=j_{\ell-1}s_\ell$, $r_0=j_0=1$: $r=91$\,px after the
+backbone and $123$\,px after the $3{\times}3$ head convolution. Each output cell therefore sees only a local
+neighbourhood, so the head must read the feature row at the anchor's own height.
+
+\paragraph{Anchor-row pooling (fix of 2026-10-18).} Let $\phi_a=(y_a+\tfrac12)/H$ be the anchor height as a fraction
+and $\rho_a=\phi_a h_f-\tfrac12$ its position on the feature grid ($h_f$ rows, centre of row $i$ at
+$(i+\tfrac12)/h_f$). With $i_0=\lfloor\rho_a\rfloor$ and $\beta=\rho_a-i_0$, the row-interpolation matrix
+$\bm R\in\R^{A\times h_f}$ has $R_{a,i_0}=1-\beta$, $R_{a,i_0+1}=\beta$; the column matrix
+$\bm C\in\R^{G\times w_f}$ averages the columns of each cell (the bins of adaptive average pooling). The pooled
+features of channel $c$ are
+\begin{equation}
+\bm P_c=\bm R\,\bm F_c\,\bm C^\top\in\R^{A\times G}.
+\end{equation}
+A per-lane $1{\times}1$ projection and one MLP shared by all $(a,l)$ produce $\bm z_{a,l}\in\R^{G+1}$.
+\impl{models/lite.py: AnchorRowPool, LanePixelHead}
+\verif{input-gradient support of every anchor contains its own image row (anchor 0, $y=226$: rows 147--285); the
+former adaptive pooling made anchor 0 read rows 0--77 (\code{test\_aligned\_head\_reads\_each\_anchor\_row});
+pilot held-out lane F1 of the light baseline 0.218 $\to$ 0.895.}
+
+%======================================================================
+\section{Temporal fusion modules}
+Per-frame features $\bm F_\tau$, $\tau=1..T$ ($T$ = current). The fusions added in v0.4 and later (residual gate, ConvGRU, attention, occlusion gate) are initialised so
+that the warm-started temporal model starts at, or very near, its single-frame baseline; the weighted and gated
+fusions of the supervisor's notebook start from fixed frame priors instead.
+
+\paragraph{Weighted (UFLD v0.2/v0.4).} $\bm F^\star=\sum_\tau w_\tau\bm F_\tau$, $\bm w=\softmax(\bm\theta)$, initial
+$\bm w=(0.1,0.2,0.7)$. \impl{models/ufld.py: TemporalWeightedFusion}
+
+\paragraph{Gated (v0.3).} Per-pixel gates $\bm g=\softmax_\tau\big(\mathrm{CNN}([\bm F_1;\dots;\bm F_T])+\bm b_0\big)$,
+$\bm F^\star=\sum_\tau g_\tau\odot\bm F_\tau$. \impl{models/ufld.py: GatedTemporalFusion}
+
+\paragraph{Warp and residual gate (lite v0.5, UFLD v0.6).} A flow $\bm u=\delta\tanh(\mathrm{CNN}([\bm F_\tau;\bm F_T]))$,
+$|\bm u|\le\delta$ cells; bilinear sampling $\tilde{\bm F}_\tau(\bm p)=\bm F_\tau(\bm p+\bm u(\bm p))$; history
+$\bm F_h=\mathrm{ReLU}(\mathrm{BN}(\bm W[\tilde{\bm F}_1;\dots]))$; gate $\gamma=\sigma(\mathrm{CNN}([\bm F_T;\bm F_h]))$ with
+bias $-2$ ($\gamma_0\approx0.12$); $\bm F^\star=\bm F_T+\gamma\odot(\bm F_h-\bm F_T)$.
+\impl{models/lite.py: LearnableFlowWarp, ResidualTemporalFusion}
+\emph{Caveat.} The flow is learned only from the lane loss and may move features vertically by up to $\delta$ cells;
+it partly repaired the head bug before the fix, so the capacity control (history = current frame) is required.
+
+\paragraph{ConvGRU (UFLD v0.7, lite v0.6).} With $\bm x_\tau=\mathrm{ReLU}(\mathrm{BN}(\bm W_r\bm F_\tau))$ and
+$\bm h_0=\bm 0$:
+\begin{align}
+\bm z_\tau&=\sigma(\bm W_z*[\bm x_\tau;\bm h_{\tau-1}]),\quad \bm r_\tau=\sigma(\bm W_r*[\bm x_\tau;\bm h_{\tau-1}]),\\
+\tilde{\bm h}_\tau&=\tanh(\bm W_h*[\bm x_\tau;\bm r_\tau\odot\bm h_{\tau-1}]),\quad
+\bm h_\tau=(1-\bm z_\tau)\odot\bm h_{\tau-1}+\bm z_\tau\odot\tilde{\bm h}_\tau,\\
+\bm F^\star&=\bm F_T+\bm W_o*\bm h_T,\qquad \bm W_o=\bm 0\ \text{at initialisation}.
+\end{align}
+\impl{models/fusion.py: ConvGRUFusion}
+
+\paragraph{Occlusion-gated write (lite v0.6\_occ).} A visibility $v_\tau=\sigma(\bm W_v*\bm x_\tau)$ multiplies the update
+gate: $\bm h_\tau=(1-\bm z_\tau v_\tau)\odot\bm h_{\tau-1}+\bm z_\tau v_\tau\odot\tilde{\bm h}_\tau$, so a low-visibility frame
+keeps the memory (OMR, SIGMA-Lane). Initial bias $+3$ ($v_0\approx0.95$). \impl{models/fusion.py: OcclusionGatedConvGRUFusion}
+
+\paragraph{Cross-frame attention (UFLD v0.8, lite v0.7).} Queries from the current frame, keys/values from every frame
+pooled to at most $12{\times}20$ cells with a frame embedding:
+$\mathrm{Attn}(\bm Q,\bm K,\bm V)=\softmax(\bm Q\bm K^\top/\sqrt{d_k})\bm V$ (multi-head); read-out added through a
+zero-initialised projection. Cost $\mathcal O(N_q\,T\,N_{kv}\,d)$. \impl{models/fusion.py: TemporalAttentionFusion}
+
+\paragraph{Temporal shift (lite\_tsm).} At the input of blocks 2--4 the first $\lfloor C/8\rfloor$ channels of frame
+$\tau$ are replaced by those of frame $\tau-1$ (zeros for the first frame):
+$\mathcal S(\bm X)_{\tau,c}=\bm X_{\tau-1,c}$ for $c<C/8$, else $\bm X_{\tau,c}$. Causal, zero parameters and MACs;
+in deployment one slice per shifted block is carried.
+\impl{models/lite.py: temporal\_shift, LiteTSM}
+\verif{carry mode equals the clip forward (\code{tests/test\_lite\_tsm\_occ.py}); pilot test F1 0.938 (light
+baseline 0.892, static control 0.931).}
+
+%======================================================================
+\section{Losses}
+For the annotated cells $\Omega=\{(a,l):c_{a,l}\neq\varnothing\}$, with $p_{a,l}=\softmax(\bm z_{a,l})$:
+\begin{align}
+\mathcal L_{\mathrm{focal}}&=-\tfrac{1}{|\Omega|}\textstyle\sum_{\Omega}(1-p_{a,l}(c_{a,l}))^{\gamma}\log p_{a,l}(c_{a,l}),\quad\gamma=2
+\quad\text{(official UFLD)},\\
+\mathcal L_{\mathrm{coord}}&=\mathrm{SmoothL1}\big(\hat x/(W-1),\,x/(W-1)\big)\ \text{on positive cells (v0.4)},\\
+\mathcal L_{\mathrm{temp}}&=\mathrm{SmoothL1}(\bm z^{(t)}_{0:G-1},\bm z^{(t-1)}_{0:G-1})+0.25\,\mathrm{SmoothL1}(e^{(t)},e^{(t-1)}),\\
+\mathcal L_{\mathrm{kd}}&=\tfrac{T_d^2}{|\Omega|}\textstyle\sum_\Omega\mathrm{KL}\big(\softmax(\bm z^{\mathrm{t}}/T_d)\,\|\,\softmax(\bm z^{\mathrm s}/T_d)\big)
+\quad\text{(added 2026-10-19)}.
+\end{align}
+$\mathcal L_{\mathrm{kd}}$ (Hinton et al.\ 2015) transfers the teacher's soft distribution (which cells are
+\emph{nearly} right); the factor $T_d^2$ keeps the gradient scale independent of $T_d$. Teacher: a trained UFLD
+temporal model, frozen, on the same clip; a single-frame student reads only the last frame.
+Other terms: existence BCE with class weights (v0.2--v0.4), gate prior (v0.3), flow smoothness
+$\|\nabla\bm u\|_1$ (v0.5), auxiliary segmentation cross-entropy (official \code{use\_aux}).
+\impl{losses.py: softmax\_focal\_loss, coord\_loss, temporal\_consistency\_loss, distillation\_loss, VariantLoss}
+\verif{KD is zero for identical logits, positive otherwise, zero with no annotated cell, and back-propagates into
+the student (\code{test\_distillation\_*}).}
+
+%======================================================================
+\section{Evaluation metrics}
+\paragraph{Lane level (CULane protocol).} Each lane is drawn as a polyline of width $w=\operatorname{round}(30W_o/1640)$
+($W_o$ = original width); $\mathrm{IoU}(i,j)=|M_i\cap M_j|/|M_i\cup M_j|$; one-to-one matching
+$\pi^\star=\arg\max_\pi\sum\mathrm{IoU}(i,\pi(i))$ (Hungarian); a match is TP if $\mathrm{IoU}\ge\tau$
+($\tau=0.5$). Over the test set
+\begin{equation}
+P=\tfrac{TP}{TP+FP},\quad R=\tfrac{TP}{TP+FN},\quad F_\beta=\tfrac{(1+\beta^2)PR}{\beta^2P+R}.
+\end{equation}
+On ELAS every frame has two lanes and every model predicts two, so each miss is one FP and one FN and $P=R=F_1$;
+the per-frame and anchor-level metrics separate the error types.
+\impl{metrics.py: lane\_mask, iou\_matrix, match\_lanes, prf, f\_beta}
+
+\paragraph{Frame level.} $\mathrm{FP}/\mathrm{frame}$, $\mathrm{FN}/\mathrm{frame}$, frames with $\ge1$ FP or FN, and
+frame accuracy $=\Pr[\mathrm{FP}=\mathrm{FN}=0]$. \impl{evaluation/evaluator.py: \_frame\_rates}
+
+\paragraph{Anchor level.} A cell is TP if both GT and prediction say ``lane'' and $|\hat c-c|\le\kappa$ cells
+($\kappa$ = 10\,px); a wrong position counts as FP and FN. Existence errors on their own populations:
+false-alarm rate $=\mathrm{FP_{ex}}/(\mathrm{FP_{ex}}+\mathrm{TN})$, miss rate $=\mathrm{FN_{ex}}/(\mathrm{FN_{ex}}+N_{\mathrm{both}})$;
+lateral MAE $=\frac1N\sum|\hat x-x|$ (original px), near and far (top quarter of the band, as ELAS's near/far error).
+\impl{metrics.py: AnchorCounts, anchor\_counts}
+
+\paragraph{Ego lane (ELAS paper).} Lane-centre deviation $|\hat c-c|$ at the bottom ROI row, in px and in \% of the GT
+lane width. \impl{evaluation/native.py: elas\_center\_counts}
+
+\paragraph{Stability.} Jitter $=\E|\hat x_t-\hat x_{t-1}|$ over cells present in consecutive frames. OpenLane-V:
+RVLD's flicker and missing rates over GT-matched lane pairs of consecutive frames (stable / flickering / missing).
+\impl{metrics.py: temporal\_jitter; evaluation/rvld\_protocol.py}
+\verif{compared line by line with the authors' \code{evaluate\_temporal.py} and \code{evaluate\_iou\_laneatt.py}.}
+
+%======================================================================
+\section{Output-level Bayesian filtering}
+\paragraph{State-space model.} Per cell, state $\bm m=(x,\dot x)^\top$, $\bm A=\begin{pmatrix}1&\Delta\\0&1\end{pmatrix}$,
+$\bm H=(1\;0)$, process noise of a piecewise-constant white acceleration of variance $q$,
+$\bm Q=q\begin{pmatrix}\Delta^4/4&\Delta^3/2\\\Delta^3/2&\Delta^2\end{pmatrix}$. (The book's continuous Wiener velocity
+model gives $q\begin{pmatrix}\Delta^3/3&\Delta^2/2\\\Delta^2/2&\Delta\end{pmatrix}$; both are standard, $q$ is tuned on
+validation.)
+
+\paragraph{Kalman filter (Särkkä 2013, Theorem 4.2).}
+\begin{align}
+\bm m^-_k&=\bm A\bm m_{k-1},\qquad \bm P^-_k=\bm A\bm P_{k-1}\bm A^\top+\bm Q,\\
+v_k&=y_k-\bm H\bm m^-_k,\quad S_k=\bm H\bm P^-_k\bm H^\top+R_k,\quad \bm K_k=\bm P^-_k\bm H^\top S_k^{-1},\\
+\bm m_k&=\bm m^-_k+\bm K_kv_k,\qquad \bm P_k=\bm P^-_k-\bm K_kS_k\bm K_k^\top.
+\end{align}
+\impl{evaluation/tracking.py: LaneKalmanTracker.update}
+\verif{the code's scalar expressions equal these matrix products term by term:
+$P^-_{00}=P_{00}+2\Delta P_{01}+\Delta^2P_{11}+Q_{00}$, $P^-_{01}=P_{01}+\Delta P_{11}+Q_{01}$,
+$P^-_{11}=P_{11}+Q_{11}$; $K=(P^-_{00},P^-_{01})/S$; $P_{00}=(1-K_0)P^-_{00}$, $P_{01}=(1-K_0)P^-_{01}$,
+$P_{11}=P^-_{11}-K_1P^-_{01}$ (since $\bm K S\bm K^\top=\bm K\bm H\bm P^-$).}
+
+\paragraph{Uncertainty-aware measurement noise (added 2026-10-19).} Theorem 4.2 holds for a time-varying $R_k$.
+We set $R_k=\max(r,\;s^2\sigma^2_k)$ with $\sigma^2_k$ the network's own predictive variance (Section 2). The gain
+$K_k=P^-_{00}/(P^-_{00}+R_k)$ then drops when the frame is uncertain (occlusion, blur), so the filter trusts its
+prediction, and rises when the frame is sharp. The innovation is Gaussian, $v_k\sim\mathcal N(0,S_k)$, so the gate
+$|v_k|>g\sqrt{S_k}$ ($g=3$: 0.27\,\% false re-initialisation under the model) replaces a fixed pixel threshold.
+\verif{with the same jump in the measurement, a frame with $\sigma^2=400$ moves the estimate less than one with
+$\sigma^2=4$ (\code{test\_adaptive\_kalman\_trusts\_uncertain\_frames\_less}).}
+\emph{Link to the open problem.} Learned gates trust the history without a calibrated measure of its reliability;
+this filter makes the weighting explicit and explainable. It is the output-level version of the
+uncertainty-weighted fusion proposed for the networks.
+
+%======================================================================
+\section{Ego-lane geometry, lane change, LDW and LKA}
+\paragraph{State of the ego lane.} With boundary abscissas $x_L,x_R$ at the reference row $y_r$ and the camera
+column $c_x$ (car axis): centre $c=\tfrac12(x_L+x_R)$, width $w_\ell=x_R-x_L$, lateral offset
+$o=(c_x-c)/w_\ell$ ($o=0$ centred, $o=\pm\tfrac12$ centre on a line).
+
+\paragraph{Heading from the vanishing point.} For a pinhole camera over a flat, straight road, both boundaries are
+image lines through the vanishing point $(v_x,v_y)$ of the road direction. Writing each boundary through its
+reference- and far-row points, $x_j(y)=x_j(y_r)+s_j(y-y_r)$, the intersection is
+\begin{equation}
+v_x=x_L+s_L\frac{x_R-x_L}{s_L-s_R}.
+\end{equation}
+For a camera aligned with the road, $v_x=c_x$ (the principal point), whatever the lateral offset; a yaw $\psi$
+moves it by $f\tan\psi$. Hence $v_x-c_x$ measures heading. \impl{ego.py: vanishing\_x, ego\_lane\_state}
+
+\begin{proposition}[why the former cue was wrong]
+Let $c(y)$ be the lane centre at row $y$. Since both boundaries pass through the vanishing point, so does their
+midline: $c(y)=v_x+(c(y_r)-v_x)\frac{y-v_y}{y_r-v_y}$. Therefore
+\[c(y_f)-c(y_r)=(c(y_r)-v_x)\,\frac{y_f-y_r}{y_r-v_y}.\]
+For an aligned car ($v_x=c_x$), $c(y_r)-c_x=-o\,w_\ell$, so the former ``heading'' $c(y_f)-c(y_r)$ is proportional to
+the lateral offset $o$, not to the heading. Its sign ($y_f<y_r$) made the term push the car away from the centre.
+\end{proposition}
+\verif{\code{test\_heading\_cue\_is\_yaw\_not\_offset}: an off-centre aligned car gives heading 0; a yawed car gives the
+expected 60\,px.}
+
+\paragraph{Lane change.} Smoothed offset $\bar o_t$ (moving average), lateral speed
+$\dot o_t\approx(\bar o_t-\bar o_{t-n})f_s/n$, time to line crossing $\mathrm{TLC}=(\tfrac12-|\bar o|)/(\operatorname{sign}(\bar o)\dot o)$.
+A manoeuvre starts after $k$ consecutive frames with $|\bar o|\ge o_s$, $\operatorname{sign}(\bar o)\dot o\ge v_s$ and
+$\mathrm{TLC}\le\tau_s$, or when a boundary changes side of $c_x$; or (predicted lanes) when the offset flips sign
+by $\ge0.35$ lane widths, confirmed over 3 frames, which is a crossing toward the side the car was approaching. It
+ends after $m$ centred frames. Planned: an interacting-multiple-model filter with ``keep'' and ``change''
+dynamics (Toledo-Moreo and Zamora-Izquierdo 2009) instead of thresholds.
+\impl{ego.py: LaneChangeDetector}
+\verif{ground-truth lanes: 8/8 events, 8/8 directions, 0 false alarms; predicted lanes, unseen scenes: 4/4, 4/4.}
+
+\paragraph{LDW and LKA.} The wheel reaches the line at $|o|=\tfrac12-h$ ($h$ = half the car width in lane widths):
+$\mathrm{TLC}_w=(\tfrac12-h-|o|)/(\operatorname{sign}(o)\dot o)$; warning if $\mathrm{TLC}_w\le\tau_w$ or the margin is
+$\le\mu$. Steering (Stanley-type, normalised): $\delta=\operatorname{clip}(-k_o\,o+k_\psi(v_x-c_x)/w_\ell,\pm\delta_{\max})$.
+Both are suppressed only by an active turn signal (either side).
+\impl{ego.py: lane\_keeping}
+
+%======================================================================
+\section{Robustness protocols}
+For a degradation $\mathcal D_\theta$ drawn with a fixed per-sample seed: \emph{current}
+$\mathcal C=(I_1,\dots,I_{T-1},\mathcal D_\theta(I_T))$; \emph{persistent}
+$\mathcal C=(\mathcal D_\theta(I_1),\dots,\mathcal D_\theta(I_T))$ (same $\theta$ in every frame); \emph{held-out}
+corruption families never used in training (cast shadow, glare). Training option
+\code{current\_frame\_persistent\_share}: the share of degraded clips that use the persistent form.
+\impl{data/transforms.py: degrade\_current\_frame; evaluation/robustness.py}
+
+%======================================================================
+\section{Statistics}
+Seeds $i=1..n$ give paired differences $d_i=m_i^{\mathrm{model}}-m_i^{\mathrm{ref}}$. Mean and $t$-interval
+$\bar d\pm t_{0.975,n-1}s_d/\sqrt n$; exact two-sided Wilcoxon signed-rank test. With $n$ pairs the smallest attainable
+two-sided $p$ is $2/2^n$ (all signs agree), so $n\ge6$ is needed for $p<0.05$ and, with Holm over a family of $m$
+tests (step-down: $p_{(k)}^{\mathrm{adj}}=\max_{j\le k}\min(1,(m-j+1)p_{(j)})$), $n\ge\lceil\log_2(2m/0.05)\rceil$; two
+primary comparisons need $n\ge7$.
+\impl{evaluation/stats.py: paired\_comparisons, holm, min\_attainable\_p, seeds\_needed}
+
+%======================================================================
+\section{Cost}
+MACs: convolution $C_{\mathrm{out}}H_{\mathrm{out}}W_{\mathrm{out}}\,(C_{\mathrm{in}}/g)\,k_hk_w$; linear
+$N\,d_{\mathrm{in}}d_{\mathrm{out}}$; multi-head attention $N_q d^2+2N_kd^2+N_qd^2+2N_qN_kd$; anchor-row pooling
+$C(Ah_fw_f+Aw_fG)$. Streaming cost per frame = one backbone pass + fusion + head (history cached).
+Measured at $384{\times}512$: UFLD 7.12, light baseline 1.99, light v0.5 2.39\,GMACs.
+\impl{evaluation/efficiency.py: count\_macs}
+
+%======================================================================
+\section{Planned: distance and time to collision}
+Flat road, camera height $h_c$, focal length $f_y$, horizon row $v_0$: a vehicle whose box bottom is at row $v_b$ is at
+range $d=f_yh_c/(v_b-v_0)$. Error propagation: $\partial d/\partial v_b=-d^2/(f_yh_c)$, so a one-pixel error grows with
+$d^2$. A constant-velocity Kalman filter on $(d,\dot d)$ gives the closing speed; time to collision
+$\mathrm{TTC}=d/(-\dot d)$ for $\dot d<0$, time headway $\mathrm{THW}=d/v_{\mathrm{ego}}$; warning thresholds follow
+FCW practice (ISO 15623, Euro NCAP). To be implemented with the vehicle (CIPO) detector and validated with CARLA's
+true ranges.
+
+%======================================================================
+\section*{References}
+\small
+Dickmanns, E.D., Mysliwetz, B.D. Recursive 3-D road and relative ego-state recognition. IEEE TPAMI 14(2), 1992.\\
+Hinton, G., Vinyals, O., Dean, J. Distilling the knowledge in a neural network. arXiv:1503.02531, 2015.\\
+Jin, D., Kim, D., Kim, C.-S. Recursive video lane detection. ICCV 2023.\\
+Lin, J., Gan, C., Han, S. TSM: Temporal shift module for efficient video understanding. ICCV 2019.\\
+Qin, Z., Wang, H., Li, X. Ultra fast structure-aware deep lane detection. ECCV 2020.\\
+Särkkä, S. Bayesian Filtering and Smoothing. Cambridge University Press, 2013.\\
+Toledo-Moreo, R., Zamora-Izquierdo, M.A. IMM-based lane-change prediction in highways with low-cost GPS/INS. IEEE
+T-ITS 10(1), 2009.\\
+Berriel, R.F. et al. Ego-Lane Analysis System (ELAS): dataset and algorithms. Image and Vision Computing, 2017.
+
+\end{document}

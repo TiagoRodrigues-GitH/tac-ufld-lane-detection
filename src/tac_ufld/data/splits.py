@@ -225,6 +225,27 @@ def group_records(records: list[FrameRecord]) -> dict[str, list[FrameRecord]]:
     return out
 
 
+def hpo_split(train: list[FrameRecord], val_fraction: float, max_train: int | None, max_val: int | None,
+              key: str) -> tuple[list[FrameRecord], list[FrameRecord]]:
+    """Optuna's own train / validation, carved from the experiment's TRAIN split only (added 2026-10-23).
+
+    Whole split groups (clips, segments, scenes) go to the HPO validation, so no HPO validation frame has a
+    temporally adjacent frame in HPO training, and neither part touches the official validation set (used
+    for early stopping, checkpoint and post-processing selection) or the test set. Both parts are then
+    capped by random frames (seeded by ``key``), which keeps every group of each part represented."""
+    groups = sorted(group_records(train))
+    if len(groups) < 2:
+        raise ValueError("hpo_split needs at least two split groups in the training split")
+    order = groups[:]
+    random.Random(f"{key}:hpo_val_groups").shuffle(order)
+    n_val = min(len(order) - 1, max(1, int(round(len(order) * val_fraction))))
+    val_groups = set(order[:n_val])
+    hpo_train = [r for r in train if split_group(r) not in val_groups]
+    hpo_val = [r for r in train if split_group(r) in val_groups]
+    return (cap_records(hpo_train, max_train, f"{key}:hpo_train"),
+            cap_records(hpo_val, max_val, f"{key}:hpo_val"))
+
+
 def carve_validation(train: list[FrameRecord], cfg: SplitConfig, min_gap: int
                      ) -> tuple[list[FrameRecord], list[FrameRecord]]:
     """Split an official training set into train/val without touching test.

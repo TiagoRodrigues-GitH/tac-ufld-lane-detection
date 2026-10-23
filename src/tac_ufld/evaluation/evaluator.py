@@ -13,7 +13,7 @@ import pandas as pd
 from tac_ufld.config import ExperimentConfig
 from tac_ufld.data.targets import LaneTargets, encode_targets
 from tac_ufld.data.types import FrameRecord
-from tac_ufld.evaluation.native import ALL_LANES_NATIVE, all_lanes_counts, all_lanes_metrics, native_metrics
+from tac_ufld.evaluation.native import NATIVE_PROTOCOLS
 from tac_ufld.evaluation.predictor import Predictions
 from tac_ufld.metrics import (
     AnchorCounts, anchor_counts, culane_line_width, f_beta, iou_matrix, lane_mask,
@@ -45,6 +45,8 @@ class Evaluator:
         self.thresholds = list(cfg.evaluation.iou_thresholds)
         cell_px = (d.img_w - 1) / (d.griding_num - 1)
         self.tol_bins = int(round(cfg.evaluation.anchor_tolerance_px / cell_px))
+        mode = cfg.evaluation.lane_interpolation
+        self.interp = ("spline" if d.dataset == "culane" else "linear") if mode == "auto" else mode
         self._targets: dict[str, LaneTargets] = {}
 
     @property
@@ -57,6 +59,13 @@ class Evaluator:
             self._targets[rec.key] = encode_targets(rec, d.img_w, d.img_h, self.anchors, d.griding_num)
         return self._targets[rec.key]
 
+    def _far_rows(self, rec: FrameRecord) -> np.ndarray:
+        """(A,) bool: anchors in the far (top) quarter of the annotated band (ELAS: the p1 row; the other three
+        annotated rows are "near", Berriel et al. 2017). Without a band, the top quarter of the anchors."""
+        y = self.anchors * (rec.image_size[1] / self.model_size[1])
+        y0, y1 = rec.valid_y_range if rec.valid_y_range is not None else (float(y.min()), float(y.max()))
+        return y < y0 + 0.25 * (y1 - y0)
+
     def _masks(self, lanes: list[np.ndarray], rec: FrameRecord, line_width: int) -> list[np.ndarray]:
         """Masks cropped to the annotated band (identical IoU, less work)."""
         w, h = rec.image_size
@@ -68,14 +77,14 @@ class Evaluator:
         for lane in lanes:
             shifted = lane.copy()
             shifted[:, 1] -= y0
-            out.append(lane_mask(shifted, w, y1 - y0, line_width))
+            out.append(lane_mask(shifted, w, y1 - y0, line_width, self.interp))
         return out
 
     def _score_frame(self, exist: np.ndarray, x: np.ndarray, weight: float, rec: FrameRecord,
-                     params: PostprocessParams, lane_only: bool, native_all_lanes: bool) -> tuple:
+                     params: PostprocessParams, lane_only: bool, native_frames: bool) -> tuple:
         """Everything ``evaluate`` needs from one frame; frames are independent, so this also runs in worker
         processes (``evaluation.workers``). Returns (row, lanes, lane counts per IoU threshold, pixel counts,
-        anchor counts, jitter item, all-lanes native counts)."""
+        anchor counts, jitter item, native count vector of the dataset's protocol or None)."""
         ev = self.cfg.evaluation
         w, h = rec.image_size
         lw = culane_line_width(w, ev.culane_line_width, ev.culane_image_width)
@@ -97,16 +106,18 @@ class Evaluator:
             shape = pm[0].shape if pm else (gm[0].shape if gm else (1, 1))
             pix = pixel_counts(pm, gm, shape)
             _, _, row["pixel_f1"] = prf(*pix)
-            anchors = anchor_counts(exist, x, self._target(rec).cls, params.threshold,
-                                    self.tol_bins, self.model_size[0], self.griding_num)
+            target = self._target(rec)
+            anchors = anchor_counts(exist, x, target.cls, params.threshold, self.tol_bins, self.model_size[0],
+                                    self.griding_num, x_target=target.x, px_scale=w / self.model_size[0],
+                                    far_rows=self._far_rows(rec))
             jitter = (rec.sequence, rec.frame_id, exist, x * (w / self.model_size[0]))
-            if native_all_lanes:
-                native = all_lanes_counts(rec, lanes, line_width=30)
+            if native_frames:
+                native = NATIVE_PROTOCOLS[rec.dataset].frame_counts(rec, lanes)
         row["current_weight"] = float(weight)
         return row, lanes, counts, pix, anchors, jitter, native
 
     def _score_parallel(self, preds: Predictions, records: list[FrameRecord], params: PostprocessParams,
-                        lane_only: bool, native_all_lanes: bool) -> list[tuple]:
+                        lane_only: bool, native_frames: bool) -> list[tuple]:
         """Frames split into chunks over ``evaluation.workers`` spawned processes; the pool lives for one call
         (no idle workers holding memory while the next model trains)."""
         workers = self.cfg.evaluation.workers
@@ -114,7 +125,7 @@ class Evaluator:
         with ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"),
                                  initializer=_init_worker, initargs=(self.cfg, self.anchors)) as pool:
             futures = [pool.submit(_score_chunk, preds.exist[a:b], preds.x[a:b], preds.current_weight[a:b],
-                                   records[a:b], params, lane_only, native_all_lanes)
+                                   records[a:b], params, lane_only, native_frames)
                        for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
             return [frame for future in futures for frame in future.result()]
 
@@ -124,15 +135,16 @@ class Evaluator:
             raise ValueError(f"{len(records)} records but {len(preds.exist)} predictions")
         dataset = records[0].dataset if records else None
         parallel = self.cfg.evaluation.workers > 1 and len(records) >= 8 * self.cfg.evaluation.workers
-        native_in_frames = parallel and not lane_only and dataset in ALL_LANES_NATIVE
+        protocol = NATIVE_PROTOCOLS.get(dataset)
+        native_frames = not lane_only and protocol is not None and protocol.frame_counts is not None
         if parallel:
-            frames = self._score_parallel(preds, records, params, lane_only, native_in_frames)
+            frames = self._score_parallel(preds, records, params, lane_only, native_frames)
         else:
             frames = [self._score_frame(preds.exist[i], preds.x[i], preds.current_weight[i], rec, params,
-                                        lane_only, False) for i, rec in enumerate(records)]
+                                        lane_only, native_frames) for i, rec in enumerate(records)]
         lane_tot = {t: np.zeros(3, dtype=np.int64) for t in self.thresholds}
         pix = np.zeros(3, dtype=np.int64)
-        native = np.zeros(3, dtype=np.int64)
+        native = None
         anchors = AnchorCounts()
         rows, all_lanes, jitter_items = [], [], []
         for row, lanes, counts, frame_pix, frame_anchors, jitter, frame_native in frames:
@@ -145,7 +157,7 @@ class Evaluator:
                 anchors += frame_anchors
                 jitter_items.append(jitter)
             if frame_native is not None:
-                native += frame_native
+                native = frame_native if native is None else native + frame_native
 
         metrics: dict[str, float] = {"n_frames": len(records),
                                      "n_gt_lanes": int(sum(r["n_gt"] for r in rows)),
@@ -158,22 +170,37 @@ class Evaluator:
                             f"lane_f2_{tag}": f_beta(p, r, 2.0),
                             f"lane_tp_{tag}": int(tp), f"lane_fp_{tag}": int(fp), f"lane_fn_{tag}": int(fn)})
         per_frame = pd.DataFrame(rows)
+        metrics.update(self._frame_rates(per_frame))
         metrics.update(self._condition_metrics(records, per_frame))
         if not lane_only:
             p, r, f1 = prf(*pix)
             metrics.update({"pixel_precision": p, "pixel_recall": r, "pixel_f1": f1})
             metrics.update(anchors.as_metrics())
             metrics.update(temporal_jitter(jitter_items, params.threshold))
-            if native_in_frames:
-                metrics.update(all_lanes_metrics(int(native[0]), int(native[1]), int(native[2]), 0.5,
-                                                 ALL_LANES_NATIVE[dataset]))
-            else:
-                metrics.update(native_metrics(records, all_lanes))
+            if native is not None:
+                metrics.update(protocol.finish(native))
+            if protocol is not None and protocol.sequence_metrics is not None:
+                metrics.update(protocol.sequence_metrics(records, all_lanes))
         if preds.loss is not None:
             metrics["focal_loss"] = preds.loss
         weights = preds.current_weight[np.isfinite(preds.current_weight)]
         metrics["mean_current_frame_weight"] = float(weights.mean()) if weights.size else float("nan")
         return EvalResult(metrics, per_frame, all_lanes)
+
+    def _frame_rates(self, per_frame: pd.DataFrame) -> dict[str, float]:
+        """Frame-level view of the primary-IoU lane errors (added 2026-10-18). Counts alone depend on the test
+        size; these are rates. ``frame_accuracy`` = share of frames where every annotated lane is found and
+        nothing else is predicted (what a lane-keeping function needs); ``frames_with_fp_rate`` /
+        ``frames_with_fn_rate`` = share of frames with at least one phantom lane / at least one missed lane."""
+        if per_frame.empty:
+            return {}
+        tag = self.primary_tag
+        fp, fn = per_frame[f"fp_{tag}"], per_frame[f"fn_{tag}"]
+        n = len(per_frame)
+        return {f"lane_fp_per_frame_{tag}": float(fp.sum() / n), f"lane_fn_per_frame_{tag}": float(fn.sum() / n),
+                f"frames_with_fp_rate_{tag}": float((fp > 0).mean()),
+                f"frames_with_fn_rate_{tag}": float((fn > 0).mean()),
+                f"frame_accuracy_{tag}": float(((fp == 0) & (fn == 0)).mean())}
 
     def _condition_metrics(self, records: list[FrameRecord], per_frame: pd.DataFrame) -> dict[str, float]:
         """Lane F1 (primary IoU) per scene condition tag. Scenes without tag
@@ -191,6 +218,8 @@ class Evaluator:
             sub = per_frame.iloc[idx]
             _, _, f1 = prf(sub[f"tp_{tag}"].sum(), sub[f"fp_{tag}"].sum(), sub[f"fn_{tag}"].sum())
             out[f"condition_f1_{tag}_{name}"] = f1
+            # FP count: CULane reports only this for 'cross' (no lanes there, so F1 is undefined)
+            out[f"condition_fp_{tag}_{name}"] = int(sub[f"fp_{tag}"].sum())
             out[f"condition_frames_{name}"] = len(idx)
         return out
 
@@ -222,7 +251,7 @@ def _init_worker(cfg: ExperimentConfig, row_anchors: np.ndarray) -> None:
 
 
 def _score_chunk(exist: np.ndarray, x: np.ndarray, weight: np.ndarray, records: list[FrameRecord],
-                 params: PostprocessParams, lane_only: bool, native_all_lanes: bool) -> list[tuple]:
+                 params: PostprocessParams, lane_only: bool, native_frames: bool) -> list[tuple]:
     assert _WORKER is not None, "worker not initialised"
-    return [_WORKER._score_frame(exist[i], x[i], weight[i], rec, params, lane_only, native_all_lanes)
+    return [_WORKER._score_frame(exist[i], x[i], weight[i], rec, params, lane_only, native_frames)
             for i, rec in enumerate(records)]

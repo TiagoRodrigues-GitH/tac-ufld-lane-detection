@@ -150,8 +150,11 @@ def parse_groundtruth(path: str | Path, scene_cfg: ElasSceneConfig) -> dict[int,
 
 
 def discover_scenes(root: Path) -> dict[str, _ScenePaths]:
-    """Index scenes below ``root``. Annotations and ``images/images`` may live
-    in different export folders as long as they share the scene folder name."""
+    """Index scenes below ``root``. Annotations and the frames may live in different export folders as long as
+    they share the scene folder name.
+
+    Frames are found in ``<scene>/images/images/`` (the usual ELAS export) or directly in ``<scene>/images/``
+    (GRI_S02 is unpacked that way; before 2026-10-19 it was not found and silently left out of every run)."""
     configs: dict[str, Path] = {}
     gts: dict[str, Path] = {}
     images: dict[str, Path] = {}
@@ -164,6 +167,9 @@ def discover_scenes(root: Path) -> dict[str, _ScenePaths]:
         if d.name == "images" and d.parent.name == "images":
             images.setdefault(d.parent.parent.name, d)
             dirnames[:] = []  # do not descend into thousands of image files
+        elif d.name == "images" and any(f.startswith(("lane_", "frame_")) for f in filenames):
+            images.setdefault(d.parent.name, d)  # frames directly in <scene>/images
+            dirnames[:] = []
     return {
         name: _ScenePaths(configs[name], gts[name], images.get(name))
         for name in configs

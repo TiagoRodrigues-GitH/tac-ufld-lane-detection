@@ -12,6 +12,21 @@ It is causal (each output uses only the current and past frames), so it is a
 deployable reference: a learned temporal model only earns its extra cost if
 it beats "single-frame model + this tracker". Its parameters are tuned on
 validation only (``tune_kalman``), like the post-processing.
+
+Model (Särkkä, Bayesian Filtering and Smoothing, 2013, Theorem 4.2): state
+(x, v) of one cell, transition A = [[1, dt], [0, 1]], measurement H = [1, 0],
+process noise of a piecewise-constant white acceleration of variance q,
+Q = q [[dt^4/4, dt^3/2], [dt^3/2, dt^2]]. Prediction P- = A P A^T + Q; update
+S = H P- H^T + R, K = P- H^T / S, m = m- + K (y - H m-), P = P- - K S K^T.
+
+Uncertainty-aware mode (``adaptive_r``, added 2026-10-19): Theorem 4.2 allows a
+time-varying measurement noise R_k, and the network supplies one, the variance
+of its own predictive distribution over the grid cells
+(``decoding.position_variance``): R_k = max(r, r_scale^2 * Var_k). An occluded
+or blurred frame spreads the softmax, so its measurement is trusted less and
+the filter leans on its prediction; a sharp frame is trusted more. The gate
+then uses the innovation covariance, |y - H m-| > gate_sigma * sqrt(S_k)
+(a Mahalanobis gate), instead of a fixed pixel distance.
 """
 
 from __future__ import annotations
@@ -34,6 +49,9 @@ class KalmanParams:
     gate_px: float = 40.0   # innovation above this re-initialises the cell
     max_gap: int = 10       # frames without an update after which a cell / the stream is reset
     threshold: float = 0.5  # existence probability that counts as a measurement
+    adaptive_r: bool = False  # R_k from the model's predictive variance (see module docstring)
+    r_scale: float = 1.0      # R_k = max(r, r_scale^2 * Var_k), Var_k in model px^2
+    gate_sigma: float = 3.0   # adaptive mode: re-initialise when |innovation| > gate_sigma * sqrt(S_k)
 
     def as_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -59,9 +77,12 @@ class LaneKalmanTracker:
         self.age[mask] = 0
         self.valid[mask] = True
 
-    def update(self, exist: np.ndarray, x: np.ndarray, index: int) -> tuple[np.ndarray, np.ndarray]:
+    def update(self, exist: np.ndarray, x: np.ndarray, index: int,
+               x_var: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Filter one frame: returns the smoothed (exist, x). ``index`` is the
-        frame index (gaps are allowed and handled as a longer prediction)."""
+        frame index (gaps are allowed and handled as a longer prediction).
+        ``x_var`` (A, L), model px^2: the predictive variance used as R_k when
+        ``params.adaptive_r``."""
         p = self.p
         exist = np.asarray(exist, dtype=np.float64)
         x = np.asarray(x, dtype=np.float64)
@@ -88,11 +109,15 @@ class LaneKalmanTracker:
         self.p00, self.p01, self.p11 = p00, p01, p11
         self.e = p.alpha * self.e + (1.0 - p.alpha) * exist
         self.age += int(dt)
-        # measurement update
+        # measurement update (R_k per cell when adaptive, else the constant r)
+        r = p.r
+        if p.adaptive_r and x_var is not None:
+            r = np.maximum(p.r, (p.r_scale ** 2) * np.asarray(x_var, dtype=np.float64))
         innovation = x - self.x
-        reinit = measured & (~self.valid | (np.abs(innovation) > p.gate_px))
+        s = self.p00 + r
+        too_far = (np.abs(innovation) > p.gate_sigma * np.sqrt(s)) if (p.adaptive_r and x_var is not None)             else (np.abs(innovation) > p.gate_px)
+        reinit = measured & (~self.valid | too_far)
         upd = measured & ~reinit
-        s = self.p00 + p.r
         k0, k1 = self.p00 / s, self.p01 / s
         self.x = np.where(upd, self.x + k0 * innovation, self.x)
         self.v = np.where(upd, self.v + k1 * innovation, self.v)
@@ -121,8 +146,9 @@ def track_predictions(preds: Predictions, records: list[FrameRecord], params: Ka
     for idx in sequence_order(records):
         tracker = LaneKalmanTracker(params)
         for i in idx:
-            exist[i], x[i] = tracker.update(preds.exist[i], preds.x[i], records[i].frame_id)
-    return Predictions(exist=exist, x=x, current_weight=preds.current_weight, loss=preds.loss)
+            exist[i], x[i] = tracker.update(preds.exist[i], preds.x[i], records[i].frame_id,
+                                            None if preds.x_var is None else preds.x_var[i])
+    return Predictions(exist=exist, x=x, current_weight=preds.current_weight, loss=preds.loss, x_var=preds.x_var)
 
 
 def tune_kalman(evaluator, preds: Predictions, records: list[FrameRecord], postprocess,
@@ -133,7 +159,8 @@ def tune_kalman(evaluator, preds: Predictions, records: list[FrameRecord], postp
     keys = list(grid)
     rows, best, best_score = [], base, -np.inf
     for combo in itertools.product(*(grid[k] for k in keys)):
-        params = replace(base, **{k: (int(v) if k == "max_gap" else float(v)) for k, v in zip(keys, combo)})
+        params = replace(base, **{k: (int(v) if k == "max_gap" else bool(v) if k == "adaptive_r" else float(v))
+                                  for k, v in zip(keys, combo)})
         result = evaluator.evaluate(track_predictions(preds, records, params), records, postprocess, lane_only=True)
         score = result.metrics[metric]
         rows.append({**params.as_dict(), metric: score})

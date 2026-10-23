@@ -32,12 +32,15 @@ def imread_bgr(path: str | Path) -> np.ndarray:
 
 
 def imwrite(path: str | Path, img: np.ndarray) -> Path:
+    from tac_ufld.reporting import long_path  # CULane example names mirror driver_*/<clip>.MP4/: long on Windows
+
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    target = long_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
     ok, buf = cv2.imencode(path.suffix or ".png", img)
     if not ok:
         raise IOError(f"cannot encode {path}")
-    buf.tofile(str(path))
+    buf.tofile(str(target))
     return path
 
 
@@ -67,6 +70,103 @@ def draw_roi(img: np.ndarray, record: FrameRecord) -> np.ndarray:
         for y in record.valid_y_range:
             cv2.line(img, (0, int(y)), (img.shape[1] - 1, int(y)), ROI_COLOR, 1, cv2.LINE_AA)
     return img
+
+
+def _frame_counts(per_frame: pd.DataFrame, tag: str, i: int) -> tuple[int, int, int]:
+    return int(per_frame[f"tp_{tag}"].iloc[i]), int(per_frame[f"fp_{tag}"].iloc[i]), int(per_frame[f"fn_{tag}"].iloc[i])
+
+
+def model_grid(record: FrameRecord, lanes_by_label: dict[str, list], frames_by_label: dict[str, pd.DataFrame],
+               index: int, tag: str, panel_w: int = 480, columns: int = 3) -> np.ndarray:
+    """One frame, every model (added 2026-10-23): panel 1 = original with the ground truth (green), then one
+    panel per model with its lanes (red), the ground truth (thin green) and the frame's TP / FP / FN at the
+    primary IoU threshold; the title turns orange when the model makes an error on this frame."""
+    img = imread_bgr(record.image_path)
+    scale = panel_w / img.shape[1]
+
+    def fit(panel: np.ndarray) -> np.ndarray:
+        return cv2.resize(panel, (panel_w, int(round(panel.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+
+    category = ", ".join(k for k, v in (record.tags or {}).items() if v)
+    gt = draw_lanes(draw_roi(img.copy(), record), record.present_lanes(), GT_COLOR, 4)
+    panels = [put_label(fit(gt), f"GT  {record.key}" + (f"  [{category}]" if category else ""), scale=0.45)]
+    for label, lanes in lanes_by_label.items():
+        panel = draw_lanes(img.copy(), record.present_lanes(), GT_COLOR, 2)
+        panel = fit(draw_lanes(panel, lanes[index], PRED_COLOR, 5))
+        tp, fp, fn = _frame_counts(frames_by_label[label], tag, index)
+        put_label(panel, f"{label}  TP {tp} FP {fp} FN {fn}", scale=0.45)
+        if fp or fn:
+            cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (0, 140, 255), 3)
+        panels.append(panel)
+    while len(panels) % columns:
+        panels.append(np.zeros_like(panels[0]))
+    rows = [cv2.hconcat(panels[i:i + columns]) for i in range(0, len(panels), columns)]
+    return cv2.vconcat(rows)
+
+
+def save_model_grids(records: list[FrameRecord], lanes_by_label: dict[str, list],
+                     frames_by_label: dict[str, pd.DataFrame], tag: str, out_dir: Path, per_group: int = 3) -> int:
+    """Grid images (``model_grid``) for the frames that separate the models best: per test category (CULane's
+    nine, ELAS scene tags, OpenLane scenarios; "all" without tags), the ``per_group`` frames with the largest
+    spread of per-frame lane F1 across the models. Returns the number of images written."""
+    f1 = []
+    for label in lanes_by_label:
+        pf = frames_by_label[label]
+        tp, fp, fn = pf[f"tp_{tag}"].to_numpy(), pf[f"fp_{tag}"].to_numpy(), pf[f"fn_{tag}"].to_numpy()
+        f1.append(np.where(tp + fp + fn > 0, 2 * tp / np.maximum(2 * tp + fp + fn, 1), 1.0))
+    spread = np.ptp(np.stack(f1), axis=0) if f1 else np.zeros(len(records))
+    groups: dict[str, list[int]] = {}
+    for i, rec in enumerate(records):
+        tags = [k for k, v in (rec.tags or {}).items() if v] or ["all"]
+        for t in tags:
+            groups.setdefault(t, []).append(i)
+    written = 0
+    for group, idxs in sorted(groups.items()):
+        best = sorted(idxs, key=lambda i: (-spread[i], i))[:per_group]
+        for i in best:
+            imwrite(out_dir / group / f"{records[i].sequence.replace('/', '_')}_{records[i].frame_id}.jpg",
+                    model_grid(records[i], lanes_by_label, frames_by_label, i, tag))
+            written += 1
+    return written
+
+
+def save_grid_video(records: list[FrameRecord], lanes_by_label: dict[str, list],
+                    frames_by_label: dict[str, pd.DataFrame], tag: str, out_path: Path, fps: int = 10,
+                    max_frames: int = 200) -> Path | None:
+    """``model_grid`` over the longest run of consecutive test frames, H.264 when ffmpeg is on PATH (plays in
+    browsers and on phones), else MPEG-4. CULane clips keep every 30th frame, so use a low ``fps`` there."""
+    run = longest_consecutive_run(records)[:max_frames]
+    if not run:
+        return None
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.gettempdir()) / f"tac_ufld_grid_{os.getpid()}.mp4"  # cv2 cannot open non-ASCII paths
+    writer = None
+    try:
+        for i in run:
+            frame = model_grid(records[i], lanes_by_label, frames_by_label, i, tag)
+            frame = frame[: frame.shape[0] // 2 * 2, : frame.shape[1] // 2 * 2]  # even size for yuv420p
+            if writer is None:
+                writer = cv2.VideoWriter(str(tmp), cv2.VideoWriter_fourcc(*"mp4v"), fps, (frame.shape[1], frame.shape[0]))
+                if not writer.isOpened():
+                    return None
+            writer.write(frame)
+    finally:
+        if writer is not None:
+            writer.release()
+    if not tmp.exists():
+        return None
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        import subprocess
+
+        h264 = tmp.with_name(tmp.stem + "_h264.mp4")
+        done = subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", str(tmp), "-c:v", "libx264", "-pix_fmt",
+                               "yuv420p", "-crf", "26", "-movflags", "+faststart", str(h264)]).returncode == 0
+        if done and h264.exists():
+            tmp.unlink(missing_ok=True)
+            tmp = h264
+    shutil.move(str(tmp), str(out_path))
+    return out_path
 
 
 def comparison_panel(record: FrameRecord, pred_lanes, title: str = "") -> np.ndarray:
@@ -115,16 +215,20 @@ def save_examples(records: list[FrameRecord], lanes: list, per_frame: pd.DataFra
 
 
 def longest_consecutive_run(records: list[FrameRecord], min_length: int = 8) -> list[int]:
-    """Indices of the longest run of consecutive frame ids within one sequence."""
+    """Indices of the longest run of consecutive stored frames within one sequence. "Consecutive" = one stored
+    stride apart: 1 for ELAS / TuSimple, 30 or 90 video frames for CULane clips (before 2026-10-23 only a
+    difference of 1 counted, so CULane never got a video)."""
     by_seq: dict[str, list[int]] = {}
     for i, rec in enumerate(records):
         by_seq.setdefault(rec.sequence, []).append(i)
     best: list[int] = []
     for idxs in by_seq.values():
         idxs.sort(key=lambda i: records[i].frame_id)
+        diffs = [records[b].frame_id - records[a].frame_id for a, b in zip(idxs, idxs[1:])]
+        stride = min((d for d in diffs if d > 0), default=1)
         run = idxs[:1]
         for prev, cur in zip(idxs, idxs[1:]):
-            run = run + [cur] if records[cur].frame_id - records[prev].frame_id == 1 else [cur]
+            run = run + [cur] if records[cur].frame_id - records[prev].frame_id == stride else [cur]
             if len(run) > len(best):
                 best = list(run)
     return best if len(best) >= min_length else []

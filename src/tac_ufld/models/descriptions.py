@@ -66,6 +66,17 @@ MODEL_NOTES: dict[str, dict[str, str]] = {
         "differs": "Remembers through a gated recurrence instead of a weighted sum. A deployment can carry one "
                    "hidden state per camera instead of storing past feature maps.",
     },
+    "ufld_v08": {
+        "role": "temporal", "origin": "New on 2026-10-05",
+        "frames": "t-4, t-2, t", "history": "cross-frame attention", "aligns": "implicitly (attention)",
+        "memory": "3-frame window",
+        "what": "Every cell of the current feature map attends (4 heads, 128 channels) to the cells of all three "
+                "frames, each frame with a learned embedding; the result is projected back and added to the "
+                "current features. The projection starts at zero, so the untrained model is exactly the baseline.",
+        "differs": "Takes context from any place and time in the window, the approach of TGC-Net and LaneTCA, "
+                   "instead of the same cell (v0.2, v0.3), a learned displacement (v0.6) or a recurrent state "
+                   "(v0.7).",
+    },
     "lite_baseline": {
         "role": "baseline", "origin": "ELAS development script",
         "frames": "t", "history": "none", "aligns": "no", "memory": "none",
@@ -105,6 +116,61 @@ MODEL_NOTES: dict[str, dict[str, str]] = {
                 "at zero).",
         "differs": "Recurrent memory on the smallest network: the candidate for an embedded system that keeps "
                    "one state tensor per camera. Unlike v0.5 it does not align frames explicitly.",
+    },
+    "lite_v07": {
+        "role": "temporal", "origin": "New on 2026-10-05",
+        "frames": "t-4, t-2, t", "history": "cross-frame attention", "aligns": "implicitly (attention)",
+        "memory": "3-frame window",
+        "what": "The lite baseline plus the cross-frame attention of UFLD v0.8; keys and values are pooled to "
+                "at most 12x20 cells per frame to keep the cost low.",
+        "differs": "Attention-based memory on the smallest network, next to lite v0.5 (flow) and lite v0.6 "
+                   "(recurrent).",
+    },
+    "lite_v06_occ": {
+        "role": "temporal", "origin": "New on 2026-10-19 (idea of OMR / SIGMA-Lane)",
+        "frames": "t-4, t-2, t", "history": "ConvGRU, occlusion-gated write", "aligns": "no",
+        "memory": "recurrent state",
+        "what": "Lite v0.6 with one extra 3x3 convolution that estimates, per feature cell, how visible the "
+                "incoming frame is. The GRU update gate is multiplied by this visibility, so a cell that is "
+                "occluded, blurred or dark in a frame keeps its memory instead of overwriting it.",
+        "differs": "Same memory as lite v0.6; only the write is gated. It targets the case where the current "
+                   "frame is the bad one, and costs about 600 parameters more.",
+    },
+    "lite_tsm": {
+        "role": "temporal", "origin": "New on 2026-10-19 (TSM, Lin et al. 2019)",
+        "frames": "t-4, t-2, t", "history": "temporal channel shift", "aligns": "no",
+        "memory": "one channel slice per shifted block",
+        "what": "The lite baseline's exact layers, with 1/8 of the channels at the input of blocks 2, 3 and 4 "
+                "taken from the previous frame (online temporal shift). Every block then mixes time with its "
+                "ordinary convolutions.",
+        "differs": "No fusion module at all: zero extra parameters and MACs. A deployment keeps one small slice "
+                   "per shifted block from the previous frame, so each frame costs exactly one baseline pass.",
+    },
+    "lite_tsm_static": {
+        "role": "control", "origin": "New on 2026-10-19 (control)",
+        "frames": "t, t, t", "history": "shift on copies of t", "aligns": "n/a", "memory": "none",
+        "what": "Lite TSM exactly (same layers, warm start, loss and budget), but every history frame is replaced "
+                "by the current frame, in training and at test time.",
+        "differs": "A capacity control. The shift alone changes the network (it mixes channels and pads the first "
+                   "frame with zeros); if lite TSM beats this model, the gain comes from the earlier frames.",
+    },
+    "lite_tsm_kd": {
+        "role": "temporal", "origin": "New on 2026-10-19 (knowledge distillation, Hinton et al. 2015)",
+        "frames": "t-4, t-2, t", "history": "temporal channel shift", "aligns": "no",
+        "memory": "one channel slice per shifted block",
+        "what": "Lite TSM trained with an extra loss that makes its per-anchor distribution over the grid cells "
+                "match the softened distribution of a trained UFLD v0.7 temporal model (the teacher) on the same "
+                "clip.",
+        "differs": "Identical network and cost to lite TSM at inference; only training differs. Compared with "
+                   "lite TSM it measures what the teacher's knowledge adds.",
+    },
+    "lite_baseline_kd": {
+        "role": "single-frame", "origin": "New on 2026-10-19 (knowledge distillation from a temporal teacher)",
+        "frames": "t", "history": "none at inference", "aligns": "n/a", "memory": "none",
+        "what": "The single-frame lite model, continued from the lite baseline, learning from the UFLD v0.7 "
+                "temporal teacher, which sees t-4, t-2 and t while the student sees only t.",
+        "differs": "Temporal knowledge at zero runtime cost: the student never reads a past frame. Compared with "
+                   "lite_baseline_ct (same extra training, no teacher).",
     },
 }
 

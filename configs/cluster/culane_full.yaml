@@ -1,0 +1,86 @@
+# CULane, FULL plan for a GPU cluster (2026-10-23): 10 models x 7 seeds x 50 epochs, Optuna on its own split.
+# About 230 GPU-hours per seed on an RTX 3050, roughly 25-35 h per seed on one A100; the 7 seeds run in
+# parallel (scripts/cluster/culane.slurm). Same protocol as configs/culane.yaml (core plan), plus the UFLD
+# temporal models and their control, every model with 50 epochs.
+#
+#   sbatch scripts/cluster/culane.slurm (see its header)   |   python run_experiment.py --plan full
+
+name: culane_full_cluster
+output_dir: results
+device: auto
+requires_confirmation: true
+
+data:
+  dataset: culane
+  root: "${CULANE_ROOT:-../../datasets/CULane}"
+  img_h: 288
+  img_w: 800
+  num_lanes: 4
+  num_row_anchors: 18
+  row_anchor_range: [0.4201, 0.9965]
+  griding_num: 200
+  num_frames: 3
+  temporal_step: 30               # 1 s, the shortest CULane history (see configs/culane.yaml)
+  num_workers: 8
+  augmentation:
+    geometric:
+      enabled: true
+      prob: 1.0
+      rotate_deg: 6.0
+      translate_x: 0.122
+      translate_y: 0.169
+    current_frame_prob: 0.3
+    current_frame_persistent_share: 0.33
+  split:
+    purge_frames: 60
+    max_train_frames: null
+
+model:
+  variants: [ufld_baseline, ufld_baseline_ct, ufld_v07, ufld_v08,
+             lite_baseline, lite_baseline_ct, lite_tsm, lite_tsm_static, lite_v06, lite_v06_occ]
+  pretrained: true
+  ufld_aux: true
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6, 7]
+  epochs: 50                      # every model, warm-started ones included
+  finetune_epochs: null
+  early_stopping_patience: 0      # fixed budget, as UFLD; best epoch on the official val
+  batch_size: 32                  # fits a >= 16 GB GPU for the 3-frame UFLD models
+  optimizer: sgd
+  lr: 0.1
+  lr_fusion: 0.1
+  momentum: 0.9
+  weight_decay: 1.0e-4
+  scheduler: multi
+  multi_steps: [25, 38]
+  warmup_iters: 695
+  amp: true
+
+hpo:
+  enabled: true
+  variants: [lite_baseline, lite_tsm, lite_v06, lite_v06_occ, ufld_v07, ufld_v08]
+  inherit: {lite_baseline_ct: lite_tsm, lite_tsm_static: lite_tsm, ufld_baseline_ct: ufld_v08}
+  n_trials: 15
+  epochs: 8
+  max_train_frames: 20000
+  val_fraction: 0.1
+  max_val_frames: 3000
+  seed: 42
+  sampler_seed: 42
+  search_space:
+    lr: {low: 0.01, high: 0.2, log: true}
+    weight_decay: {low: 1.0e-5, high: 1.0e-3, log: true}
+    lr_fusion: {low: 0.01, high: 0.3, log: true}
+
+evaluation:
+  primary_pairs: [[lite_tsm, ufld_baseline], [lite_tsm, lite_tsm_static]]
+  iou_thresholds: [0.5, 0.35]
+  lane_interpolation: auto
+  postprocess_grid: {threshold: [0.4, 0.5, 0.6], min_points: [2, 3], poly_degree: [0]}
+  robustness_max_frames: 10000
+  latency_runs: 50
+  n_visual_examples: 12
+  visualize_seeds: 1
+  workers: 8
+  tensorboard: true

@@ -36,6 +36,19 @@ of frame ``t - temporal_step`` (``temporal_step`` interleaved chains, so
 consecutive updates are as far apart as in training). Memory then reaches
 back to the start of the stream; a missing predecessor restarts the chain.
 
+Temporal shift (``lite_tsm``)
+-----------------------------
+The shift is inside the backbone, so the per-frame cache of ``cached`` mode
+holds block-1 output (the input of the first shifted block, which depends
+on its frame only) and the head re-runs blocks 2-4 over the window: exact,
+but blocks 2-4 run ``num_frames`` times per frame. ``mode="carry"`` is the
+online TSM deployment: the state is the shifted channel slice of each
+shifted block (3 small tensors) and a frame costs one baseline pass. Its
+memory is finite: it equals the clip forward over the last 4 frames of the
+chain (one per shifted block plus the current), one more than the 3-frame
+training clip. The capacity controls (``*_static``) have no carried state:
+carry is refused.
+
 Output tracker
 --------------
 ``tracker=KalmanParams(...)`` filters the decoded lane points of each
@@ -101,7 +114,10 @@ class StreamingLaneDetector:
         self.loaded = loaded
         self.backend = backend or TorchBackend(model, loaded.device)
         if mode == "carry" and not (getattr(model, "recurrent", False) and hasattr(self.backend, "step")):
-            raise ValueError("mode 'carry' needs a recurrent model (ufld_v07, lite_v06) on the PyTorch backend")
+            raise ValueError("mode 'carry' needs a recurrent model (ufld_v07, lite_v06, lite_v06_occ, lite_tsm) "
+                             "on a backend with a step (PyTorch, or ONNX Runtime with step.onnx)")
+        if mode == "carry" and loaded.card.get("static_history"):
+            raise ValueError("mode 'carry' would feed real history to a static-history capacity control")
         self.mode = mode
         self.tracker_params = tracker
         self.temporal = loaded.temporal
@@ -230,7 +246,13 @@ class StreamingLaneDetector:
 
             if state.tracker is None:
                 state.tracker = LaneKalmanTracker(self.tracker_params)
-            exist, x_model = state.tracker.update(exist, x_model, index)
+            x_var = None
+            if getattr(self.tracker_params, "adaptive_r", False):  # R_k from the model's predictive variance
+                from tac_ufld.decoding import position_variance
+
+                cell = (self.loaded.cfg.data.img_w - 1) / (grid - 1)
+                x_var = (position_variance(logits_t.float())[0] * cell * cell).cpu().numpy()
+            exist, x_model = state.tracker.update(exist, x_model, index, x_var)
         lanes = lanes_from_prediction(exist, x_model, self.anchors, self.postprocess, self.loaded.model_size,
                                       size, self.valid_y_range)
         confidence = []

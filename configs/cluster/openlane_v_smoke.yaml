@@ -1,0 +1,50 @@
+# CLUSTER smoke test (~15 min): every stage of configs/cluster/openlane_v.yaml (aux loss, batch 32, all 10 models)
+# on a few frames, to catch environment, data and GPU-memory problems before the 48 h jobs. Numbers are NOT results.
+
+name: openlane_v_cluster_smoke
+output_dir: results
+device: auto
+
+data:
+  dataset: openlane_v
+  root: "${OPENLANE_ROOT}"
+  img_h: 384
+  img_w: 640
+  num_lanes: 4
+  num_row_anchors: 36
+  row_anchor_range: [0.30, 0.995]
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1
+  num_workers: 0
+  jpeg_draft: false
+  split:
+    split_seed: 2026
+    val_strategy: sequences
+    purge_frames: 2
+    val_fraction: 0.25
+    seen_test_fraction: 0.0
+    max_train_frames: 64
+    max_val_frames: 16
+    max_test_frames: 16
+
+model:
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v06, ufld_v07, ufld_v08, lite_baseline, lite_v05, lite_v06, lite_v07]
+  pretrained: false
+  ufld_aux: true          # official UFLD auxiliary segmentation loss (as configs/cluster/openlane_v.yaml)
+
+train:
+  seeds: [1]
+  epochs: 1
+  batch_size: 32
+  early_stopping_patience: 0
+
+hpo:
+  enabled: false
+
+evaluation:
+  postprocess_grid: {threshold: [0.5], min_points: [2], poly_degree: [0]}
+  kalman_grid: {q: [1.0], alpha: [0.0]}
+  latency_runs: 2
+  n_visual_examples: 2
+  tensorboard: false

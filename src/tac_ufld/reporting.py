@@ -38,11 +38,31 @@ def write_excel(path: Path, sheets: dict[str, pd.DataFrame]) -> Path | None:
         return None
 
 
+_EXTENDED = "\\\\?\\"  # Windows extended-length prefix: backslash backslash ? backslash
+
+
+def long_path(path: Path) -> Path:
+    """On Windows, the extended-length form (prefix ``\\\\?\\``) of an absolute path, which is not limited to 260
+    characters: CULane predictions mirror ``driver_*/<clip>.MP4/<frame>.lines.txt`` below the run folder, and the
+    whole path passed 260 characters in a deep base folder (2026-10-23). Unchanged elsewhere."""
+    import os
+
+    if os.name != "nt":
+        return path
+    text = str(Path(path).resolve())
+    if text.startswith(_EXTENDED):
+        return Path(text)
+    if text.startswith("\\\\"):  # network share \\server\share -> \\?\UNC\server\share
+        return Path(_EXTENDED + "UNC\\" + text[2:])
+    return Path(_EXTENDED + text)
+
+
 def export_lines_txt(records, lanes_per_record, out_dir: Path) -> int:
     """Write predictions in CULane ``.lines.txt`` format (one lane per line,
     ``x y x y ...`` in original pixels), ported from the supervisor's
     ``save_lanes_txt`` / ``export_cache_predictions``. Returns files written."""
     count = 0
+    out_dir = long_path(Path(out_dir))
     for rec, lanes in zip(records, lanes_per_record):
         path = out_dir / rec.sequence / f"{rec.frame_id:05d}.lines.txt"
         path.parent.mkdir(parents=True, exist_ok=True)

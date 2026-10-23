@@ -73,8 +73,13 @@ class TorchBackend:
 
     @torch.no_grad()
     def step(self, current, state):
-        """Recurrent models only: one update of the carried hidden state."""
-        out = self.model.recurrent_step(self._in(current), None if state is None else self._in(state))
+        """Recurrent models only: one update of the carried state (one tensor for the ConvGRU, a tuple of
+        per-layer slices for lite_tsm)."""
+        if isinstance(state, (tuple, list)):
+            state = tuple(self._in(s) for s in state)
+        elif state is not None:
+            state = self._in(state)
+        out = self.model.recurrent_step(self._in(current), state)
         return out["logits"], out["state"]
 
     def synchronize(self) -> None:

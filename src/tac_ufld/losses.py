@@ -64,6 +64,20 @@ def parsing_relation_dis(logits: torch.Tensor) -> torch.Tensor:
     return sum(F.l1_loss(diffs[i], diffs[i + 1]) for i in range(len(diffs) - 1)) / (len(diffs) - 1)
 
 
+def distillation_loss(student: torch.Tensor, teacher: torch.Tensor, valid: torch.Tensor,
+                      temperature: float) -> torch.Tensor:
+    """Hinton et al. (2015) knowledge distillation on the row-anchor classification: per (anchor, lane) cell,
+    T^2 * KL(softmax(z_t / T) || softmax(z_s / T)) over the G+1 classes, averaged over the annotated cells
+    (``valid``; outside them the teacher was never trained). T^2 keeps the gradient scale independent of T."""
+    if not valid.any():
+        return student.sum() * 0.0
+    t = float(temperature)
+    log_ps = F.log_softmax(student.float() / t, dim=1)
+    log_pt = F.log_softmax(teacher.float() / t, dim=1)
+    kl = (log_pt.exp() * (log_pt - log_ps)).sum(dim=1)          # (B, A, L)
+    return kl[valid].mean() * t * t
+
+
 def weighted_exist_bce(logits: torch.Tensor, exist: torch.Tensor, valid: torch.Tensor,
                        neg_weight: float, pos_weight: float) -> torch.Tensor:
     if not valid.any():
@@ -126,10 +140,18 @@ class Hyperparams:
 
 class VariantLoss:
     """Total training loss for one variant. ``focal`` is the component shared
-    by every model and is the one logged as the comparable loss."""
+    by every model and is the one logged as the comparable loss.
 
-    def __init__(self, spec: VariantSpec, loss_cfg: LossConfig, hp: Hyperparams, img_w: int) -> None:
+    What it does: always the official UFLD focal classification loss over the G+1 classes of every (anchor,
+    lane) cell; then, depending on the ``VariantSpec``, the optional terms: UFLD similarity/shape losses,
+    auxiliary segmentation, weighted existence BCE, gate prior, soft-argmax coordinate loss, flow smoothness, and
+    a temporal-consistency term between the single-frame predictions of the last two frames. Cells marked
+    ``IGNORE_INDEX`` (outside the annotated band, unknown slots) never contribute."""
+
+    def __init__(self, spec: VariantSpec, loss_cfg: LossConfig, hp: Hyperparams, img_w: int,
+                 distill_weight: float = 0.0, distill_temperature: float = 2.0) -> None:
         self.spec, self.cfg, self.hp, self.img_w = spec, loss_cfg, hp, img_w
+        self.distill_weight, self.distill_temperature = distill_weight, distill_temperature
 
     def __call__(self, model: nn.Module, outputs: dict, batch: dict,
                  include_temporal: bool = True) -> tuple[torch.Tensor, dict[str, float]]:
@@ -145,7 +167,15 @@ class VariantLoss:
             term = parsing_relation_dis(logits.float())
             total = total + self.cfg.shp_loss_w * term
             logs["shape"] = term.detach()
+        if "aux_seg" in outputs and "seg" in batch:  # official UFLD auxiliary segmentation (training only)
+            term = F.cross_entropy(outputs["aux_seg"].float(), batch["seg"])
+            total = total + self.cfg.aux_loss_w * term
+            logs["aux_seg"] = term.detach()
         spec = self.spec
+        if spec.teacher is not None and "teacher_logits" in outputs and self.distill_weight > 0:
+            term = distillation_loss(logits, outputs["teacher_logits"], valid, self.distill_temperature)
+            total = total + self.distill_weight * term
+            logs["kd"] = term.detach()
         if spec.exist_bce is not None:
             term = weighted_exist_bce(logits, batch["exist"], valid, spec.exist_bce.neg_weight,
                                       spec.exist_bce.pos_weight)

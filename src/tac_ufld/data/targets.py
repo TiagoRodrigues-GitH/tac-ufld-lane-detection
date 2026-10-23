@@ -85,3 +85,27 @@ def encode_targets(
         exist[present, slot] = 1.0
         x[present, slot] = x_model[present]
     return LaneTargets(cls=cls, exist=exist, x=x, valid=cls != IGNORE_INDEX)
+
+
+def seg_from_cls(cls: np.ndarray, row_anchors: np.ndarray, img_w: int, img_h: int, griding_num: int,
+                 stride: int = 8) -> np.ndarray:
+    """Lane-segmentation label of the UFLD auxiliary branch, (ceil(H/stride), ceil(W/stride)) int64: 0 =
+    background, ``slot + 1`` on the lane.
+
+    Built from the row-anchor targets (after any augmentation, so image and label always agree): between
+    consecutive annotated anchors the lane's x is interpolated at every label row and the nearest cell is set.
+    One cell wide at stride 8, as the official 16 px lane masks become after the resize to the input size and
+    the 1/8 downsampling."""
+    h, w = -(-img_h // stride), -(-img_w // stride)
+    seg = np.zeros((h, w), dtype=np.int64)
+    rows = (np.arange(h) + 0.5) * stride - 0.5  # label-row centres in model pixels
+    for slot in range(cls.shape[1]):
+        lane = cls[:, slot]
+        on = (lane >= 0) & (lane < griding_num)
+        if on.sum() < 2:
+            continue
+        ya, xa = row_anchors[on], bin_to_x(lane[on], img_w, griding_num)
+        inside = (rows >= ya.min()) & (rows <= ya.max())
+        cols = np.floor(np.interp(rows[inside], ya, xa) / stride).astype(np.int64)
+        seg[np.flatnonzero(inside), np.clip(cols, 0, w - 1)] = slot + 1
+    return seg

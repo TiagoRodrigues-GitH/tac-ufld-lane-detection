@@ -5,7 +5,8 @@ Order of operations (the test split is only read in step 5):
 1. data     - parse the dataset, build the seed-independent split, check for
               leakage, save manifests, render label-check overlays and the
               ELAS geometry check.
-2. hpo      - Optuna per variant on (a subset of) train, scored on val.
+2. hpo      - Optuna per variant on its own split carved from TRAIN by whole groups
+              (hpo_train / hpo_val); the official val and the test set are never used.
 3. training - for every seed, train variants in warm-start order; each
               temporal variant starts from the SAME seed's reference model.
 4. tuning   - per model and seed, sweep post-processing on validation.
@@ -32,7 +33,7 @@ from tac_ufld import __version__
 from tac_ufld.config import PROJECT_ROOT, ExperimentConfig, expand_env, save_config
 from tac_ufld.data import build_adapter
 from tac_ufld.data.dataset import TemporalLaneDataset
-from tac_ufld.data.splits import DataSplits, build_splits, cap_records
+from tac_ufld.data.splits import DataSplits, build_splits, hpo_split, split_group
 from tac_ufld.data.targets import encode_targets, make_row_anchors
 from tac_ufld.data.types import FrameRecord
 from tac_ufld.evaluation.efficiency import measure_efficiency
@@ -108,11 +109,14 @@ class ExperimentRunner:
 
     def dataset(self, split: str, num_frames: int, augment: bool = False,
                 records: list[FrameRecord] | None = None, static_history: bool = False) -> TemporalLaneDataset:
-        key = (split, num_frames, augment, None if records is None else len(records), static_history)
+        # the records' identity, not only their count: two different subsets of equal size must not share a cache
+        key = (split, num_frames, augment, None if records is None else hash(tuple(r.key for r in records)),
+               static_history)
         if key not in self._datasets:
             recs = records if records is not None else self.splits.as_dict()[split]
             self._datasets[key] = TemporalLaneDataset(recs, self.adapter, self.cfg.data, self.anchors,
-                                                      num_frames, augment=augment, static_history=static_history)
+                                                      num_frames, augment=augment, static_history=static_history,
+                                                      aux_seg=self.cfg.model.ufld_aux)
         return self._datasets[key]
 
     def loader(self, dataset: TemporalLaneDataset, shuffle: bool, seed: int = 0) -> DataLoader:
@@ -191,33 +195,61 @@ class ExperimentRunner:
     def _frames(self, variant: str) -> int:
         return self.cfg.data.num_frames if resolve_spec(variant, self.cfg).temporal else 1
 
+    def _train_frames(self, variant: str) -> int:
+        """Clip length of the TRAINING set: a distillation student gets the teacher's clip even if it is
+        single-frame itself (it reads the last frame; the teacher reads the whole clip)."""
+        spec = resolve_spec(variant, self.cfg)
+        if spec.teacher and resolve_spec(spec.teacher, self.cfg).temporal:
+            return self.cfg.data.num_frames
+        return self._frames(variant)
+
+    def _teacher(self, variant: str, path: Path | None) -> torch.nn.Module | None:
+        """The frozen distillation teacher of ``variant`` (None if it has none)."""
+        spec = resolve_spec(variant, self.cfg)
+        if not spec.teacher:
+            return None
+        override = self.cfg.train.distill_teacher_checkpoint
+        if override:
+            path = Path(expand_env(override, "train.distill_teacher_checkpoint"))
+            path = path if path.is_absolute() else PROJECT_ROOT / path
+        if path is None or not Path(path).exists():
+            raise FileNotFoundError(f"{variant} needs a trained '{spec.teacher}' checkpoint as teacher")
+        teacher = build_model(spec.teacher, self.cfg, pretrained=False)
+        load_checkpoint(Path(path), teacher, "cpu")
+        LOGGER.info("[%s] distillation teacher %s from %s", variant, spec.teacher, Path(path).name)
+        return teacher.to(self.device).eval()
+
     def _static(self, variant: str) -> bool:
         return resolve_spec(variant, self.cfg).history == "current"
 
     def train_variant(self, variant: str, seed: int, hp: Hyperparams, epochs: int, patience: int,
                       warm_from: Path | None, checkpoint: Path | None, train_records=None,
-                      trial=None, writer=None, tag: str = "", resume: bool = False
-                      ) -> tuple[torch.nn.Module, TrainResult]:
+                      trial=None, writer=None, tag: str = "", resume: bool = False,
+                      teacher_from: Path | None = None, val_records=None) -> tuple[torch.nn.Module, TrainResult]:
         set_seed(seed, self.cfg.train.deterministic)
         spec = resolve_spec(variant, self.cfg)
         frames = self._frames(variant)
         model = self._build(variant, warm_from)
         static = self._static(variant)
-        train_ds = self.dataset("train", frames, augment=True, records=train_records, static_history=static)
-        val_ds = self.dataset("val", frames, static_history=static)
+        train_ds = self.dataset("train", self._train_frames(variant), augment=True, records=train_records,
+                                static_history=static)
+        # val_records: the HPO validation (run_hpo); None = the experiment's validation split
+        val_ds = self.dataset("val" if val_records is None else "hpo_val", frames, records=val_records,
+                              static_history=static)
         trainer = Trainer(
             model, spec, self.cfg, hp, self.device,
             train_loader=self.loader(train_ds, shuffle=True, seed=seed),
             val_loader=self.loader(val_ds, shuffle=False), val_records=val_ds.records,
             evaluator=self.evaluator, epochs=epochs, patience=patience,
             writer=writer, trial=trial, tag=tag or f"{variant} s{seed}",
+            teacher=self._teacher(variant, teacher_from),
         )
         # The checkpoint is self-describing: the resolved config rebuilds the
         # exact architecture and the card fixes the input/output conventions
         # used by streaming inference, ONNX export and the UI.
         meta = {"seed": seed, "config_hash": self.cfg.config_hash(), "version": __version__,
                 "config": self.cfg.to_dict(), "card": model_card(self.cfg, variant)}
-        result = trainer.fit(checkpoint, extra_meta=meta, resume=resume)
+        result = trainer.fit(checkpoint, extra_meta=meta, resume=resume, evaluate_initial=warm_from is not None)
         return model, result
 
     # =================================================================== HPO
@@ -236,7 +268,9 @@ class ExperimentRunner:
         if not h.enabled:
             return self.best_params
         targets = [v for v in self.variants if h.variants is None or v in h.variants]
-        subset = cap_records(self.splits.train, h.max_train_frames, f"{cfg.data.split.split_seed}:hpo")
+        subset, hpo_val = hpo_split(self.splits.train, h.val_fraction, h.max_train_frames, h.max_val_frames,
+                                    f"{cfg.data.split.split_seed}:hpo")
+        self._write_hpo_split(hpo_dir, subset, hpo_val)
         references: dict[str, Path] = {}
         for variant in self.variants:
             spec = resolve_spec(variant, cfg)
@@ -249,7 +283,8 @@ class ExperimentRunner:
                 def objective(hp: Hyperparams, trial, _v=variant, _spec=spec) -> float:
                     model, result = self.train_variant(
                         _v, h.seed, hp, h.epochs, patience=0, warm_from=references.get(_spec.warm_start),
-                        checkpoint=None, train_records=subset, trial=trial, tag=f"hpo {_v} t{trial.number}")
+                        checkpoint=None, train_records=subset, trial=trial, tag=f"hpo {_v} t{trial.number}",
+                        teacher_from=references.get(_spec.teacher), val_records=hpo_val)
                     del model
                     self._free()
                     return result.best_score
@@ -257,21 +292,46 @@ class ExperimentRunner:
                 result = run_study(variant, space, self.base_hyperparams(), objective, h.n_trials,
                                    h.sampler_seed, hpo_dir)
                 self.best_params[variant] = result["params"]
-            dependants = [v for v in targets if resolve_spec(v, cfg).warm_start == variant]
+            dependants = [v for v in targets if variant in (resolve_spec(v, cfg).warm_start,
+                                                             resolve_spec(v, cfg).teacher)]
             if dependants:  # train this variant once to warm-start the dependants' trials
                 ref_path = hpo_dir / "references" / f"{variant}.pt"
                 done = ref_path.with_suffix(".done")
                 if not (self.resume and ref_path.exists() and done.exists()):
                     model, _ = self.train_variant(variant, h.seed, self.hyperparams(variant), h.epochs, 0,
                                                   references.get(spec.warm_start), ref_path, train_records=subset,
-                                                  tag=f"hpo reference {variant}")
+                                                  tag=f"hpo reference {variant}",
+                                                  teacher_from=references.get(spec.teacher), val_records=hpo_val)
                     done.write_text("complete\n", encoding="utf-8")
                     ref_path.with_name(ref_path.stem + ".last.pt").unlink(missing_ok=True)
                     del model
                     self._free()
                 references[variant] = ref_path
+        for variant, source in h.inherit.items():  # controls get the tuned settings of the model they control
+            if variant in self.variants and source in self.best_params:
+                self.best_params[variant] = dict(self.best_params[source])
+                LOGGER.info("HPO: %s inherits the tuned hyper-parameters of %s", variant, source)
         write_json(hpo_dir / "best_params.json", self.best_params)
         return self.best_params
+
+    def _write_hpo_split(self, hpo_dir: Path, hpo_train: list[FrameRecord], hpo_val: list[FrameRecord]) -> None:
+        """Record Optuna's split and prove it is disjoint from the official validation and test sets."""
+        parts = (("hpo_train", hpo_train), ("hpo_val", hpo_val), ("val", self.splits.val), ("test", self.splits.test))
+        groups = {name: {split_group(r) for r in recs} for name, recs in parts}
+        keys = {name: {r.key for r in recs} for name, recs in parts}
+        overlap = {f"{a}_{b}": len(keys[a] & keys[b]) for a in ("hpo_train", "hpo_val") for b in ("val", "test")}
+        overlap["hpo_train_hpo_val_groups"] = len(groups["hpo_train"] & groups["hpo_val"])
+        if any(overlap.values()):
+            raise RuntimeError(f"HPO split overlaps another split: {overlap}")
+        hpo_dir.mkdir(parents=True, exist_ok=True)
+        write_json(hpo_dir / "hpo_split.json", {
+            "source": "experiment TRAIN split only; whole split groups to hpo_val (hpo.val_fraction), then capped",
+            "hpo_train": {"frames": len(hpo_train), "groups": len(groups["hpo_train"])},
+            "hpo_val": {"frames": len(hpo_val), "groups": len(groups["hpo_val"])},
+            "overlap_frames_or_groups": overlap})
+        LOGGER.info("HPO split: hpo_train %d frames (%d groups), hpo_val %d frames (%d groups); "
+                    "official val and test untouched", len(hpo_train), len(groups["hpo_train"]),
+                    len(hpo_val), len(groups["hpo_val"]))
 
     # ================================================================= seeds
 
@@ -299,9 +359,11 @@ class ExperimentRunner:
                     LOGGER.info("resume: %s seed %d already trained", variant, seed)
                     continue
                 spec = resolve_spec(variant, cfg)
+                epochs = cfg.train.finetune_epochs if (spec.warm_start and cfg.train.finetune_epochs)                     else cfg.train.epochs
                 model, result = self.train_variant(
-                    variant, seed, self.hyperparams(variant), cfg.train.epochs, cfg.train.early_stopping_patience,
-                    checkpoints.get(spec.warm_start), ckpt, writer=writer, resume=self.resume)
+                    variant, seed, self.hyperparams(variant), epochs, cfg.train.early_stopping_patience,
+                    checkpoints.get(spec.warm_start), ckpt, writer=writer, resume=self.resume,
+                    teacher_from=checkpoints.get(spec.teacher))
                 result.history.to_csv(history_csv, index=False)
                 ckpt.with_name(ckpt.stem + ".last.pt").unlink(missing_ok=True)  # large; training is complete
                 plots.plot_history(result.history, self.labels[variant], cfg.evaluation.selection_metric,
@@ -320,7 +382,7 @@ class ExperimentRunner:
         common = PostprocessParams.from_config(cfg.evaluation.common_postprocess)
         (seed_dir / "postprocess").mkdir(parents=True, exist_ok=True)
         (seed_dir / "per_frame").mkdir(parents=True, exist_ok=True)
-        rows, test_lanes = [], {}
+        rows, test_lanes, test_frames = [], {}, {}
         for variant in self.variants:
             spec = resolve_spec(variant, cfg)
             frames = self._frames(variant)
@@ -352,7 +414,8 @@ class ExperimentRunner:
                         static_history=True)))
                 if kalman is not None:
                     variants_of_input.append(("kalman", track_predictions(preds, ds.records, kalman)))
-                if split == "test" and cfg.evaluation.carry_state_eval and getattr(model, "recurrent", False):
+                if (split == "test" and cfg.evaluation.carry_state_eval and getattr(model, "recurrent", False)
+                        and not static):  # a static-history control has no real history to carry
                     variants_of_input.append(("carry", carry_predictions(
                         model, ds, self.adapter, self.device, cfg.data.img_w, cfg.train.amp, cfg.data.temporal_step)))
                 for input_mode, p in variants_of_input:
@@ -370,6 +433,7 @@ class ExperimentRunner:
                             res.per_frame.to_csv(seed_dir / "per_frame" / f"{variant}_{split}.csv", index=False)
                             if split == "test":
                                 test_lanes[variant] = res.pred_lanes
+                                test_frames[variant] = res.per_frame
                             if visualize:
                                 export_lines_txt(ds.records, res.pred_lanes,
                                                  seed_dir / "predictions" / split / variant)
@@ -383,6 +447,18 @@ class ExperimentRunner:
             records = self.dataset("test", 1).records
             overlays.save_temporal_video(records, {self.labels[v]: l for v, l in test_lanes.items()},
                                          seed_dir / "visuals" / "test_sequence.mp4")
+            # one panel per model (2026-10-23): per test category, the frames that separate the models best,
+            # and a grid video; CULane keeps every 30th video frame, hence 2 fps there
+            by_label = {self.labels[v]: l for v, l in test_lanes.items()}
+            frames_by_label = {self.labels[v]: f for v, f in test_frames.items()}
+            tag = self.evaluator.primary_tag
+            n = overlays.save_model_grids(records, by_label, frames_by_label, tag,
+                                          seed_dir / "visuals" / "model_comparison")
+            video = overlays.save_grid_video(records, by_label, frames_by_label, tag,
+                                             seed_dir / "visuals" / "model_comparison.mp4",
+                                             fps=2 if cfg.data.dataset == "culane" else 10)
+            LOGGER.info("visuals: %d model-comparison grids in %s; %s", n, seed_dir / "visuals" / "model_comparison",
+                        f"video {video.name}" if video else "no video (no run of >= 8 consecutive test frames)")
         return pd.DataFrame(rows)
 
     def _log_metrics(self, variant: str, seed: int, split: str, metrics: dict[str, float]) -> None:
@@ -420,6 +496,22 @@ class ExperimentRunner:
         main_metrics += [f"lane_f1_{iou_tag(t)}" for t in cfg.evaluation.iou_thresholds[1:]]
         main_metrics += ["pixel_f1", "anchor_f1", "jitter_px", "empty_prediction_frames",
                          f"lane_fp_{tag}", f"lane_fn_{tag}"]
+        # Error view (2026-10-18): F1 hides WHICH error a model makes. Rates per frame, existence errors per
+        # anchor cell, lateral position error, and the ELAS ego-lane metrics.
+        detection_table = [f"lane_f1_{tag}", f"lane_precision_{tag}", f"lane_recall_{tag}",
+                           f"lane_fp_per_frame_{tag}", f"lane_fn_per_frame_{tag}", f"frames_with_fp_rate_{tag}",
+                           f"frames_with_fn_rate_{tag}", f"frame_accuracy_{tag}"]
+        localisation_table = ["anchor_f1", "anchor_false_alarm_rate", "anchor_gt_negative_cells", "anchor_miss_rate",
+                              "anchor_wrong_position_rate",
+                              "anchor_mae_px", "anchor_mae_near_px", "anchor_mae_far_px", "jitter_px"]
+        main_metrics += [m for m in detection_table + localisation_table if m not in main_metrics]
+        main_metrics += ["anchor_precision", "anchor_recall", "jitter_p95_px", "pixel_precision", "pixel_recall"]
+        # name -> higher is better, for the paired tests (each metric its own exploratory Holm family)
+        tested = {f"lane_f1_{tag}": True, f"lane_precision_{tag}": True, f"lane_recall_{tag}": True,
+                  f"lane_f2_{tag}": True, f"lane_fp_per_frame_{tag}": False, f"lane_fn_per_frame_{tag}": False,
+                  f"frame_accuracy_{tag}": True, "pixel_f1": True, "anchor_f1": True,
+                  "anchor_false_alarm_rate": False, "anchor_miss_rate": False, "anchor_mae_px": False,
+                  "jitter_px": False, "native_elas_center_err_pct": False}
         pairs = [(v, resolve_spec(v, cfg).reference) for v in self.variants
                  if resolve_spec(v, cfg).reference in self.variants]
         # equal-training controls: temporal vs the baseline given the same extra
@@ -456,7 +548,14 @@ class ExperimentRunner:
                 agg.to_csv(rep / f"aggregate_{name}.csv", index=False)
                 sheets[f"agg_{name}"] = agg
                 md += [f"\n## {split} split, {protocol} post-processing (mean ± std over seeds)\n",
-                       markdown_table(summary_table(agg, main_metrics[:6] + ["jitter_px"], self.labels))]
+                       markdown_table(summary_table(agg, main_metrics[:6] + ["jitter_px"], self.labels)),
+                       "\n### Detection errors (lane level, primary IoU; per-frame rates, lower FP/FN is better)\n",
+                       markdown_table(summary_table(agg, [m for m in detection_table if m in set(agg["metric"])],
+                                                    self.labels)),
+                       "\n### Existence and position errors (anchor level; MAE in original px, far = top quarter "
+                       "of the annotated band)\n",
+                       markdown_table(summary_table(agg, [m for m in localisation_table if m in set(agg["metric"])],
+                                                    self.labels))]
                 if native_cols:
                     native = aggregate(sub, native_cols)
                     native.to_csv(rep / f"aggregate_native_{name}.csv", index=False)
@@ -469,7 +568,7 @@ class ExperimentRunner:
                     plots.plot_condition_heatmap(sub, self.labels, rep / "test_conditions")
                     plots.plot_error_counts(sub, tag, self.labels, rep / "test_error_counts")
                     plots.plot_efficiency(efficiency, sub, f"lane_f1_{tag}", self.labels, rep / "efficiency")
-                    higher = {f"lane_f1_{tag}": True, f"lane_f2_{tag}": True, "pixel_f1": True, "jitter_px": False}
+                    higher = {m: h for m, h in tested.items() if m in sub.columns}
                     paired = paired_comparisons(sub, pairs, higher, primary_pairs=primary,
                                                 primary_metric=f"lane_f1_{tag}")
                     paired.to_csv(rep / "paired_tests_test_tuned.csv", index=False)

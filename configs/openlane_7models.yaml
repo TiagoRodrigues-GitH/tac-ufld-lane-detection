@@ -1,0 +1,103 @@
+# OpenLane full run (local subset) with the 7 decided models. Derived from configs/openlane.yaml on 2026-10-20;
+# only the settings below differ: 7 variants, seeds 1-3 (add 4-7 later: --seeds 4 5 6 7, same name, --resume),
+# epochs 30 / patience 8 (lite models were still improving at 12), persistent corruption share 0.33, primary pairs
+# [lite_tsm, lite_baseline_ct] and [ufld_v07, ufld_baseline]. No HPO: the ELAS training recipe for every model.
+# Batch 8 (6 GB RTX 3050). Run it with docker-compose.openlane.yml (resumes after a shutdown).
+name: openlane_7models
+output_dir: results
+device: auto
+requires_confirmation: true
+description: 'OpenLane (local subset, 95 segments) full run: the 7 decided models,
+  seeds 1-3 first (4-7 later with --seeds into the same folder), persistent corruption
+  share 0.33, up to 30 epochs with early stopping, Docker service openlane-7models.'
+data:
+  dataset: openlane
+  root: ${OPENLANE_ROOT}
+  img_h: 320
+  img_w: 480
+  num_lanes: 4
+  num_row_anchors: 36
+  row_anchor_range:
+  - 0.4
+  - 0.995
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1
+  num_workers: 4
+  jpeg_draft: true
+  skip_unattributed_frames: true
+  augmentation:
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale:
+      - 0.9
+      - 1.1
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale:
+      - 0.85
+      - 1.0
+    current_frame_prob: 0.3
+    current_frame_persistent_share: 0.33
+  split:
+    split_seed: 2026
+    val_strategy: sequences
+    purge_frames: 2
+    val_fraction: 0.15
+    seen_test_fraction: 0.0
+    cap_by_sequence: true
+    max_train_frames: null
+    max_val_frames: 1000
+    max_test_frames: null
+model:
+  variants:
+  - ufld_baseline
+  - ufld_v07
+  - lite_baseline
+  - lite_baseline_ct
+  - lite_tsm
+  - lite_tsm_static
+  - lite_v06
+  backbone: '18'
+  pretrained: true
+train:
+  seeds:
+  - 1
+  - 2
+  - 3
+  epochs: 30
+  batch_size: 8
+  optimizer: adam
+  lr: 0.0004
+  lr_fusion: 0.0005
+  weight_decay: 0.0001
+  scheduler: cos
+  warmup_iters: 100
+  grad_clip_norm: 1.0
+  early_stopping_patience: 8
+  amp: true
+  lambda_temporal: 0.01
+  lambda_coord: 0.35
+hpo:
+  enabled: false
+evaluation:
+  primary_pairs:
+  - - lite_tsm
+    - lite_baseline_ct
+  - - ufld_v07
+    - ufld_baseline
+  postprocess_grid:
+    threshold:
+    - 0.4
+    - 0.5
+    min_points:
+    - 2
+    - 3
+    poly_degree:
+    - 0
+  latency_runs: 50
+  n_visual_examples: 12
+  workers: 4

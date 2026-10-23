@@ -54,6 +54,17 @@ CULANE_IMAGE_SIZE = (1640, 590)
 _LISTS = {"train": "train_gt.txt", "val": "val_gt.txt", "test": "test.txt"}
 
 
+def stored_stride_tag(rel: str) -> str | None:
+    """``stride_1s`` for ``*_30frame`` drivers (one stored frame per second at 30 fps), ``stride_3s`` for
+    ``*_90frame`` drivers; None if the driver folder does not say."""
+    driver = rel.replace("\\", "/").lstrip("/").split("/", 1)[0].lower()
+    if driver.endswith("_30frame"):
+        return "stride_1s"
+    if driver.endswith("_90frame"):
+        return "stride_3s"
+    return None
+
+
 def read_lines_txt(path: str | Path) -> list[np.ndarray]:
     """Parse a CULane ``.lines.txt`` file: one lane per line, ``x y x y ...``."""
     path = Path(path)
@@ -208,11 +219,18 @@ class CULaneAdapter(LaneDatasetAdapter):
                 stats["flag_mismatch"] += int(any((s is not None) != bool(f) for s, f in zip(slots, flags)))
             category = categories.get(rel.lower())
             stats["used"] += 1
+            # Tags: the official test category, plus how often the clip stores a frame (2026-10-23): with a
+            # 1-s history (temporal_step 30) only "stride_1s" clips give a temporal model real history, so
+            # every metric is also reported for the two groups separately (condition_*_stride_1s / _3s).
+            tags = {category: True} if category else {}
+            stride = stored_stride_tag(rel)
+            if stride:
+                tags[stride] = True
             records.append(FrameRecord(
                 dataset=self.name, sequence=str(Path(rel).parent).replace("\\", "/"),
                 frame_id=int(image.stem), image_path=image, image_size=CULANE_IMAGE_SIZE,
                 lanes=tuple(slots), slot_known=(True,) * self.num_lanes,
-                valid_y_range=None, tags={category: True} if category else None,
+                valid_y_range=None, tags=tags or None,
                 meta={"split": split, "eval_lanes": lanes, "existence_flags": flags,
                       "category": category},
             ))

@@ -106,6 +106,11 @@ class AugmentationConfig:
     # corrupted current frame), so the training recipe stays identical across
     # the pair. Sampled independently of ``prob``; 0 = off (no random draws).
     current_frame_prob: float = 0.0
+    # Share of those degraded clips in which the SAME degradation is applied to every frame (a persistent
+    # occluder) instead of the current frame only (added 2026-10-19). With 0 the history is always clean in
+    # training, and temporal models learn to trust it: in the pilot, lite_tsm fell below its single-frame baseline
+    # under persistent corruption (0.775 vs 0.795) while winning when only the current frame was degraded.
+    current_frame_persistent_share: float = 0.0
     current_frame_ops: list[str] = field(default_factory=lambda: ["occlude", "blur", "darken", "noise"])
     current_occlusion_boxes: list[int] = field(default_factory=lambda: [1, 3])
     current_occlusion_scale: list[float] = field(default_factory=lambda: [0.03, 0.12])  # area fraction per box
@@ -115,7 +120,9 @@ class AugmentationConfig:
     current_noise_std: list[float] = field(default_factory=lambda: [0.08, 0.2])
 
 
-CURRENT_FRAME_OPS = ("occlude", "blur", "darken", "noise")
+CURRENT_FRAME_OPS = ("occlude", "blur", "darken", "noise", "shadow", "glare")
+# Never in the default training ops: the robustness evaluation uses them as unseen corruptions.
+HELD_OUT_DEGRADATION_OPS = ("shadow", "glare")
 
 
 HPO_PARAMS = ("lr", "lr_fusion", "weight_decay", "lambda_temporal", "lambda_coord", "lr_backbone_mult")
@@ -236,6 +243,12 @@ class ModelConfig:
     # Dropout of the lite models (values of the original ELAS script).
     lite_dropout: float = 0.05
     lite_head_dropout: float = 0.15
+    # Row pooling of the lite head (review 2026-10-18). "aligned": every row anchor reads the features at its own
+    # image row (``AnchorRowPool``). "uniform": the original AdaptiveAvgPool2d((A, G)), which spreads the anchors
+    # over the whole image although they only cover the road band, so most anchors read the wrong rows (the top
+    # ELAS anchor read the sky). Only for reproducing runs made before the fix; checkpoints without this key load
+    # as "uniform" (inference.loading).
+    lite_anchor_rows: str = "aligned"
     # Initialise the models that are not warm-started (the baselines) from
     # another checkpoint instead of ImageNet only: an official UFLD
     # checkpoint (e.g. culane_18.pth / tusimple_18.pth) or one of our own
@@ -250,6 +263,10 @@ class ModelConfig:
     aligned_max_disp: float = 4.0
     # Recurrent fusion (ufld_v07, lite_v06): ConvGRU hidden channels.
     recurrent_hidden: int = 64
+    # Auxiliary segmentation branch of the official UFLD training recipe (``use_aux = True`` in its CULane and
+    # TuSimple configs): a lane-segmentation head on backbone stages 2-4, trained with the row-anchor loss and
+    # removed at inference. Applies to every UFLD-family model, baselines and temporal variants alike.
+    ufld_aux: bool = False
 
 
 @dataclass
@@ -257,6 +274,7 @@ class LossConfig:
     focal_gamma: float = 2.0
     sim_loss_w: float = 0.0   # official UFLD CULane config value
     shp_loss_w: float = 0.0   # official UFLD CULane config value
+    aux_loss_w: float = 1.0   # official UFLD weight of the auxiliary segmentation loss (with model.ufld_aux)
     # Uniform label smoothing of the focal classification term (0 = official).
     label_smoothing: float = 0.0
 
@@ -265,6 +283,10 @@ class LossConfig:
 class TrainConfig:
     seeds: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5, 6])
     epochs: int = 50
+    # Fixed training budget of the warm-started models (temporal variants and the _ct / _static controls,
+    # which start from the trained baseline of the same seed). None = train.epochs. Every warm-started model
+    # gets the same budget, so a temporal model and its controls stay comparable (added 2026-10-23).
+    finetune_epochs: int | None = None
     batch_size: int = 8
     optimizer: str = "adam"
     lr: float = 4.0e-4
@@ -292,6 +314,14 @@ class TrainConfig:
     # frozen). ResNet: 1 = stem (conv1/bn1), 2 = + layer1, 3 = + layer2,
     # 4 = + layer3, 5 = whole backbone. Lite: N of the 4 conv blocks.
     freeze_backbone_stages: int = 0
+    # Knowledge distillation (added 2026-10-19) for variants whose spec names a ``teacher``: the student also
+    # matches the teacher's softened (G+1)-class distribution of every annotated (anchor, lane) cell,
+    # L_kd = T^2 KL(softmax(z_t / T) || softmax(z_s / T)) (Hinton et al. 2015). The teacher is the same-seed
+    # checkpoint of the teacher variant trained earlier in the run, or ``distill_teacher_checkpoint`` (a fixed
+    # file trained on the SAME split and anchors, for pilots).
+    distill_weight: float = 1.0
+    distill_temperature: float = 2.0
+    distill_teacher_checkpoint: str | None = None
 
 
 @dataclass
@@ -313,7 +343,15 @@ class HPOConfig:
     sampler_seed: int = 42
     seed: int = 42
     max_train_frames: int | None = 2000
+    # Optuna's own validation (2026-10-23): carved from the experiment's TRAIN split by whole split groups
+    # (clips / segments), disjoint from the HPO training frames, so the official validation set (early
+    # stopping, checkpoint and post-processing selection) and the test set are never seen during HPO.
+    val_fraction: float = 0.1
+    max_val_frames: int | None = 2000
     variants: list[str] | None = None  # None -> every configured variant
+    # {variant: source}: the variant uses the source's tuned hyper-parameters instead of its own study, so a
+    # control (_ct, _static) gets exactly the settings of the model it controls (added 2026-10-23)
+    inherit: dict[str, str] = field(default_factory=dict)
     load_best_params: str | None = None  # path to a previous best_params.json
     search_space: dict[str, SearchParam] = field(default_factory=dict)
 
@@ -332,6 +370,13 @@ class EvalConfig:
     iou_thresholds: list[float] = field(default_factory=lambda: [0.5, 0.35])
     culane_line_width: float = 30.0
     culane_image_width: float = 1640.0
+    # How a lane is drawn before the IoU: "spline" (interpolating cubic spline, the official CULane tool),
+    # "linear" (straight segments), "auto" = spline for CULane, linear otherwise (added 2026-10-23).
+    lane_interpolation: str = "auto"
+    # Test frames used by `tac_ufld robustness` (seeded random subset; null = every test frame). With a cap the
+    # clean F1 it compares against is recomputed on the same frames (added 2026-10-23: 34,680 CULane test
+    # frames x 4 protocols x models x 7 seeds would take days).
+    robustness_max_frames: int | None = None
     anchor_tolerance_px: float = 10.0
     selection_metric: str = "lane_f1_iou50"
     # Comparisons declared BEFORE the run as the paper's primary tests
@@ -362,7 +407,8 @@ class EvalConfig:
     # It is the cheap temporal reference a learned temporal model must beat.
     kalman: bool = True
     kalman_grid: dict[str, list[float]] = field(
-        default_factory=lambda: {"q": [0.1, 1.0, 10.0], "alpha": [0.0, 0.5, 0.8]}
+        # adaptive_r 0/1: constant R vs R_k from the model's predictive variance (2026-10-19), chosen on val
+        default_factory=lambda: {"q": [0.1, 1.0, 10.0], "alpha": [0.0, 0.5, 0.8], "adaptive_r": [0.0, 1.0]}
     )
     # Recurrent models are also evaluated frame by frame with the hidden
     # state carried across the whole sequence (longer memory than the
@@ -452,6 +498,8 @@ class ExperimentConfig:
             raise ConfigError("model.v04_warm_start must be 'baseline' or 'v02'")
         if self.model.lite_history_encoder not in ("shared", "tiny"):
             raise ConfigError("model.lite_history_encoder must be 'shared' or 'tiny'")
+        if self.model.lite_anchor_rows not in ("aligned", "uniform"):
+            raise ConfigError("model.lite_anchor_rows must be 'aligned' or 'uniform'")
         if d.normalize not in ("imagenet", "none"):
             raise ConfigError("data.normalize must be 'imagenet' or 'none'")
         if t.optimizer not in ("adam", "adamw", "sgd"):
@@ -467,6 +515,12 @@ class ExperimentConfig:
             raise ConfigError("img_h and img_w must be multiples of 32 (ResNet stride)")
         if d.num_frames < 1:
             raise ConfigError("data.num_frames must be >= 1")
+        if self.train.finetune_epochs is not None and self.train.finetune_epochs < 1:
+            raise ConfigError("train.finetune_epochs must be >= 1 or null")
+        if self.evaluation.lane_interpolation not in ("auto", "linear", "spline"):
+            raise ConfigError("evaluation.lane_interpolation must be auto, linear or spline")
+        if not 0 < self.hpo.val_fraction < 1:
+            raise ConfigError("hpo.val_fraction must be in (0, 1)")
         for name in self.hpo.search_space:
             if name not in HPO_PARAMS:
                 raise ConfigError(f"unsupported HPO parameter '{name}' (supported: {HPO_PARAMS})")
@@ -479,12 +533,14 @@ class ExperimentConfig:
             raise ConfigError("model.aligned_max_disp must be > 0 and model.recurrent_hidden >= 4")
         if t.lr_backbone_mult <= 0:
             raise ConfigError("train.lr_backbone_mult must be > 0")
+        if t.distill_weight < 0 or t.distill_temperature <= 0:
+            raise ConfigError("train.distill_weight must be >= 0 and train.distill_temperature > 0")
         if not 0 <= t.freeze_backbone_stages <= 5:
             raise ConfigError("train.freeze_backbone_stages must be in [0, 5]")
-        unknown_kf = set(e.kalman_grid) - {"q", "r", "alpha", "gate_px"}
+        unknown_kf = set(e.kalman_grid) - {"q", "r", "alpha", "gate_px", "adaptive_r", "r_scale", "gate_sigma"}
         if unknown_kf or any(not v for v in e.kalman_grid.values()):
             raise ConfigError(f"evaluation.kalman_grid: unknown key(s) {sorted(unknown_kf)} or empty value list "
-                              "(supported: q, r, alpha, gate_px)")
+                              "(supported: q, r, alpha, gate_px, adaptive_r, r_scale, gate_sigma)")
         from tac_ufld.data import KNOWN_DATASETS  # local import avoids a cycle
 
         if d.dataset.lower() not in KNOWN_DATASETS:
@@ -558,6 +614,8 @@ class ExperimentConfig:
                                   + (" <= 1" if name == "crop_scale" else ""))
         if not 0 <= a.current_frame_prob <= 1:
             raise ConfigError("data.augmentation.current_frame_prob must be in [0, 1]")
+        if not 0 <= a.current_frame_persistent_share <= 1:
+            raise ConfigError("data.augmentation.current_frame_persistent_share must be in [0, 1]")
         bad_ops = [op for op in a.current_frame_ops if op not in CURRENT_FRAME_OPS]
         if bad_ops or (a.current_frame_prob > 0 and not a.current_frame_ops):
             raise ConfigError(f"data.augmentation.current_frame_ops must be a non-empty subset of {CURRENT_FRAME_OPS}")

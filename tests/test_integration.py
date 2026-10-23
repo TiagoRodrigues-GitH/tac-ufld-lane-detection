@@ -29,6 +29,14 @@ def test_full_pipeline_on_synthetic_data(tiny_config):
     geometry = pd.read_csv(out / "data" / "label_geometry_check.csv")
     assert (geometry["median_line_residual_px"] < 0.5).all()
     assert (out / "hpo" / "best_params.json").exists()
+    # 2026-10-23: Optuna has its own split carved from train, disjoint from val and test
+    import json
+    hpo_split = json.loads((out / "hpo" / "hpo_split.json").read_text(encoding="utf-8"))
+    assert hpo_split["hpo_train"]["frames"] > 0 and hpo_split["hpo_val"]["frames"] > 0
+    assert not any(hpo_split["overlap_frames_or_groups"].values())
+    # 2026-10-23: a warm-started model scores its starting weights first (epoch 0), the baseline does not
+    assert pd.read_csv(out / "seed_1" / "history_ufld_v02.csv")["epoch"].min() == 0
+    assert pd.read_csv(out / "seed_1" / "history_ufld_baseline.csv")["epoch"].min() == 1
     assert (out / "report" / "results.xlsx").exists()
     assert any((out / "seed_1" / "visuals").rglob("*.png"))
     static = results[results["input"] == "static_history"]

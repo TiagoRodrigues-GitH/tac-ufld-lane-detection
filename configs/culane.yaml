@@ -1,59 +1,104 @@
-# CULane template (adapter ported from the supervisor's notebook; checked
-# against the CULane layout with synthetic fixtures, NOT yet run on real
-# CULane data - run `python -m tac_ufld validate-dataset --dataset culane`).
-# Uses the official train/val/test lists.
-# Official UFLD CULane setting: 288x800, 18 row anchors 121..287, 200 cells, 4 lanes.
+# CULane, CORE plan (2026-10-23): runs on one 6 GB GPU (RTX 3050) in about 2.5 days for seed 1 and about
+# 15 days for 7 seeds (docs/PLAN_CULANE_2026-10-23.md). The full 10-model plan is configs/cluster/culane_full.yaml.
+#
+#   python run_experiment.py --plan core          (or: python -m tac_ufld run --config configs/culane.yaml --confirm)
+#
+# Protocol: official CULane lists (train 88,880 / val 9,675 / test 34,680 in 9 categories). Optuna tunes on its
+# own split carved from train by whole clips (results/<run>/hpo/hpo_split.json); the official val selects the
+# checkpoint and the post-processing; the test set is read once, at the end.
+# Model input, anchors and grid are the official UFLD CULane setting: 288x800, 18 row anchors 121..287,
+# 200 cells, 4 lanes. Every model gets the same augmentation (UFLD's geometric one + photometric + current-frame
+# degradation), so a difference between two models is not a difference of recipe. The article recipe of the
+# UFLD baseline alone is reproduced by configs/culane_ufld_reproduction.yaml.
 
-name: culane
+name: culane_core
 output_dir: results
 device: auto
 requires_confirmation: true   # multi-day run
 
 data:
   dataset: culane                 # DATASET-SPECIFIC: adapter tac_ufld/data/culane.py
-  root: "${CULANE_ROOT}"          # DATASET-SPECIFIC: folder with driver_*/, laneseg_label_w16/, list/
-  img_h: 288                      # DATASET-SPECIFIC: official UFLD CULane input 288x800 (source 1640x590)
+  root: "${CULANE_ROOT:-../../datasets/CULane}"   # folder with driver_*/, laneseg_label_w16/, list/
+  img_h: 288                      # official UFLD CULane input 288x800 (source 1640x590)
   img_w: 800
-  num_lanes: 4                    # DATASET-SPECIFIC: CULane annotates up to 4 lanes
-  num_row_anchors: 18             # DATASET-SPECIFIC: official UFLD CULane row anchors
+  num_lanes: 4                    # CULane annotates up to 4 lanes
+  num_row_anchors: 18             # official UFLD CULane row anchors
   row_anchor_range: [0.4201, 0.9965]   # 121/287 .. 286/287 of the 288-px height
-  griding_num: 200                # DATASET-SPECIFIC: official UFLD CULane grid cells
+  griding_num: 200                # official UFLD CULane grid cells
   num_frames: 3
-  # Frame ids are video-frame numbers; clips store every 30th frame
-  # (*_30frame drivers) or every 90th (*_90frame drivers). 90 = the
-  # supervisor's notebook value (3 s at 30 fps) and exists in both folder
-  # types; 30 would find no history in the 90-frame drivers.
-  temporal_step: 90
-  num_workers: 4
+  # Frame ids are video-frame numbers and CULane keeps every 30th (*_30frame) or 90th (*_90frame) frame, so
+  # the shortest history CULane has is 1 s (30). The 90frame drivers (train driver_161, test driver_193) have
+  # no frame 30 back: their history falls back to the current frame (logged as "history frames unavailable").
+  # The temporal claim of the article rests on ELAS (30 fps); see docs/PLAN_CULANE_2026-10-23.md, section 3.
+  temporal_step: 30
+  num_workers: 6
+  # image_cache: ../../datasets/CULane_cache_288x800   # optional: python scripts/cache_images.py --config configs/culane.yaml
   augmentation:
-    # Official UFLD training augmentation (cfzd/Ultra-Fast-Lane-Detection,
-    # data/dataloader.py): RandomRotate(6), RandomUDoffsetLABEL(100),
-    # RandomLROffsetLABEL(200), applied to every training image. Without
-    # geometric augmentation UFLD overfitted badly on ELAS (docs/PILOT_V2_FINDINGS.md).
+    # Official UFLD geometric augmentation (cfzd/Ultra-Fast-Lane-Detection, data/dataloader.py):
+    # RandomRotate(6), RandomUDoffsetLABEL(100), RandomLROffsetLABEL(200), on every training image.
     geometric:
       enabled: true
       prob: 1.0
       rotate_deg: 6.0
-      translate_x: 0.122            # DATASET-SPECIFIC: 200 px of the 1640-px source width
-      translate_y: 0.169            # DATASET-SPECIFIC: 100 px of the 590-px source height
-    current_frame_prob: 0.3        # v0.4 recipe: degrade only the current frame of 30 % of clips
+      translate_x: 0.122            # 200 px of the 1640-px source width
+      translate_y: 0.169            # 100 px of the 590-px source height
+    current_frame_prob: 0.3         # degrade the current frame of 30 % of the clips (pilot recipe)
+    current_frame_persistent_share: 0.33   # ... and the whole window in a third of those (pilot 3)
   split:
-    purge_frames: 180   # >= temporal_step * (num_frames - 1); official lists are used
+    purge_frames: 60                # >= temporal_step * (num_frames - 1); official lists are used
     max_train_frames: null
 
 model:
-  # Add v0.4 models as needed (budget!): ufld_baseline_ct, ufld_v06 (aligned),
-  # ufld_v07 (recurrent), lite_baseline, lite_v05, lite_v05_static, lite_v06.
-  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v04]
+  # Core plan: the article's baseline, the light baseline and its equal-training control, the best light
+  # temporal model (TSM) with its capacity control, and the occlusion-gated ConvGRU (pilot 3).
+  variants: [ufld_baseline, lite_baseline, lite_baseline_ct, lite_tsm, lite_tsm_static, lite_v06_occ]
+  pretrained: true                # ImageNet ResNet-18 for UFLD, as in the article (lite trains from scratch)
+  ufld_aux: true                  # UFLD's auxiliary segmentation loss (training only), as in the article
 
 train:
-  seeds: [1, 2, 3, 4, 5, 6]
-  epochs: 50
+  seeds: [1, 2, 3, 4, 5, 6, 7]
+  epochs: 50                      # baselines (UFLD v1, lite baseline): 50 epochs, as UFLD
+  finetune_epochs: 15             # warm-started models (temporal and _ct / _static controls): fixed, equal budget
+  early_stopping_patience: 0      # fixed budgets as in UFLD (no early stopping); best epoch on the official val
   batch_size: 32
-  optimizer: sgd        # official CULane recipe: SGD 0.1, multi-step [25, 38], warm-up 695
-  lr: 0.1
+  optimizer: sgd                  # official CULane recipe: SGD 0.1, momentum 0.9, weight decay 1e-4,
+  lr: 0.1                         #   multi-step decay at epochs 25 and 38 (scaled to the fine-tuning budget),
+  lr_fusion: 0.1                  #   linear warm-up 695 iterations; fusion layers at the same lr under SGD (A1)
+  momentum: 0.9
+  weight_decay: 1.0e-4
   scheduler: multi
+  multi_steps: [25, 38]
   warmup_iters: 695
+  amp: true
 
 hpo:
-  enabled: false
+  enabled: true
+  # UFLD v1 keeps the article's recipe (no tuning). The light baseline (trained from scratch, no published
+  # recipe) and the fine-tuning of the two light temporal models are tuned; each control inherits the
+  # settings of the model it controls.
+  variants: [lite_baseline, lite_tsm, lite_v06_occ]
+  inherit: {lite_baseline_ct: lite_tsm, lite_tsm_static: lite_tsm}
+  n_trials: 10
+  epochs: 6
+  max_train_frames: 16000         # hpo_train: random frames of the clips left after hpo_val
+  val_fraction: 0.1               # hpo_val: 10 % of the training clips (whole clips), then capped
+  max_val_frames: 2000
+  seed: 42
+  sampler_seed: 42
+  search_space:
+    lr: {low: 0.01, high: 0.2, log: true}
+    weight_decay: {low: 1.0e-5, high: 1.0e-3, log: true}
+    lr_fusion: {low: 0.01, high: 0.3, log: true}    # temporal variants only
+
+evaluation:
+  # Declared before the run (at most 2 primary pairs with 7 seeds: exact Wilcoxon + Holm).
+  primary_pairs: [[lite_tsm, ufld_baseline], [lite_tsm, lite_tsm_static]]
+  iou_thresholds: [0.5, 0.35]     # 0.5 = CULane
+  lane_interpolation: auto        # spline for CULane, as the official evaluation
+  postprocess_grid: {threshold: [0.4, 0.5, 0.6], min_points: [2, 3], poly_degree: [0]}
+  robustness_max_frames: 5000     # seeded subset of the test set for the 4 robustness protocols
+  latency_runs: 50
+  n_visual_examples: 12
+  visualize_seeds: 1
+  workers: 6
+  tensorboard: true

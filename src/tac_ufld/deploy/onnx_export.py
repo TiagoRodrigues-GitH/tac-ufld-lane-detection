@@ -10,11 +10,20 @@ name, shape and convention):
     - ``head.onnx``     history_features (1, T-1, C', h, w), current_features
       (1, C', h, w) -> logits (fusion + classifier, run every frame);
     - ``clip.onnx``     clip (1, T, C, H, W) -> logits (non-streaming reference).
+    - ``step.onnx``     recurrent models only (ConvGRU, lite_tsm; not the static
+      controls): current_features, state_0.. -> logits, next_state_0.. (one
+      carried-state update, streaming mode "carry").
 
 The temporal state is NOT inside the graphs: the caller keeps a ring buffer of
 per-frame ``history_features`` and passes the T-1 entries selected by the
-temporal rule (``tac_ufld.inference.streaming``). Exporting only a single-frame
-graph of a temporal model would not be a streaming deployment.
+temporal rule (``tac_ufld.inference.streaming``), or, with ``step.onnx``, the
+state returned for the previous frame of the chain. Exporting only a
+single-frame graph of a temporal model would not be a streaming deployment.
+
+For ``lite_tsm`` the shift is inside the backbone: ``encoder.onnx`` is block 1
+(the input of the first shifted block) and ``head.onnx`` runs blocks 2-4 over
+the window; ``step.onnx`` runs blocks 2-4 once with the previous frame's
+channel slices (the online TSM deployment, one baseline pass per frame).
 
 ``LanePixelHead`` uses ``AdaptiveAvgPool2d`` with output sizes that do not
 divide the input (e.g. 24x32 -> 18x100), which ONNX exporters do not support;
@@ -122,6 +131,21 @@ class LogitsGraph(nn.Module):
         return self.model(x)["logits"]
 
 
+class StepGraph(nn.Module):
+    """Recurrent models: one update of the carried state (streaming mode "carry"). The state is one tensor
+    (ConvGRU) or a tuple of per-layer slices (lite_tsm); the graph always takes it as inputs ``state_0..``
+    (zeros at the start of a stream, as ``recurrent_step(..., None)``) and returns ``logits, next_state_0..``."""
+
+    def __init__(self, model: nn.Module, tuple_state: bool) -> None:
+        super().__init__()
+        self.model, self.tuple_state = model, tuple_state
+
+    def forward(self, current_features: torch.Tensor, *state: torch.Tensor):
+        out = self.model.recurrent_step(current_features, tuple(state) if self.tuple_state else state[0])
+        new = out["state"]
+        return (out["logits"], *(tuple(new) if self.tuple_state else (new,)))
+
+
 def _export(module: nn.Module, args: tuple, path: Path, input_names: list[str], output_names: list[str],
             opset: int) -> str:
     """Try the TorchScript exporter first (mature operator coverage, stable
@@ -195,6 +219,18 @@ def export_model(loaded: LoadedModel, out_dir: str | Path, opset: int = OPSET) -
             how = _export(LogitsGraph(model), (clip,), out / "clip.onnx", ["clip"], ["logits"], opset)
             graphs["clip"] = {"file": "clip.onnx", "inputs": {"clip": list(clip.shape)},
                               "outputs": {"logits": logits_shape}, "exporter": how}
+            if getattr(model, "recurrent", False) and not loaded.card.get("static_history"):
+                state = model.recurrent_step(enc["current"], None)["state"]
+                tuple_state = isinstance(state, (tuple, list))
+                state = tuple(state) if tuple_state else (state,)
+                names = [f"state_{i}" for i in range(len(state))]
+                how = _export(StepGraph(model, tuple_state), (enc["current"], *state), out / "step.onnx",
+                              ["current_features", *names], ["logits", *[f"next_{n}" for n in names]], opset)
+                graphs["step"] = {"file": "step.onnx", "tuple_state": tuple_state, "exporter": how,
+                                  "inputs": {"current_features": list(enc["current"].shape),
+                                             **{n: list(s.shape) for n, s in zip(names, state)}},
+                                  "outputs": {"logits": logits_shape,
+                                              **{f"next_{n}": list(s.shape) for n, s in zip(names, state)}}}
     changed = [k for k, v in model.state_dict().items() if not torch.equal(v, before[k])]
     if model.training or changed:
         raise RuntimeError(f"export modified the model (training={model.training}, changed tensors: {changed[:5]})")
@@ -221,6 +257,14 @@ def export_model(loaded: LoadedModel, out_dir: str | Path, opset: int = OPSET) -
                                                               graphs["encoder"]["outputs"]["current_features"]),
             "bytes_per_cached_frame": int(np.prod(graphs["encoder"]["outputs"].get(
                 "history_features", graphs["encoder"]["outputs"]["current_features"])) * 4),
+            **({} if "step" not in graphs else {"carry": {
+                "description": "alternative to the ring buffer (streaming mode 'carry'): encoder, then step.onnx "
+                               "with the state returned for frame t - temporal_step (zeros at a stream start or "
+                               "when that frame is missing); temporal_step interleaved state chains",
+                "state_shapes": {k: v for k, v in graphs["step"]["inputs"].items() if k.startswith("state_")},
+                "bytes_per_chain": int(sum(np.prod(v) for k, v in graphs["step"]["inputs"].items()
+                                           if k.startswith("state_")) * 4),
+            }}),
         },
         "config": loaded.cfg.to_dict(),
     }

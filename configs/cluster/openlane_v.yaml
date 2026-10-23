@@ -1,0 +1,103 @@
+# CLUSTER version of configs/openlane_v.yaml (docs/RUN_ON_CLUSTER.md): the full OpenLane-V experiment for the
+# article. Differences from the desktop config, all toward the official UFLD recipe and the published protocol:
+#   model.ufld_aux: true   official auxiliary segmentation loss for every UFLD-family model (baselines included)
+#   train.batch_size: 32   official UFLD batch (Adam 4e-4, cosine, warm-up: the official TuSimple recipe)
+#   train.seeds: 1-7       7 paired seeds: two primary comparisons with Holm need >= 7 (as ELAS)
+#   train.epochs: 30       instead of 12 (desktop budget); RVLD trains 100
+# Seeds are independent: run them as an array job (--seeds k), then one `run --resume` builds the report.
+
+# OpenLane-V (video lane detection benchmark of RVLD, Jin et al., ICCV 2023): the comparable OpenLane result
+# of the article. Same protocol as the published table (RVLD 0.825, LaneTCA 0.822, GANet 0.801, CLRNet 0.789,
+# CondLaneNet 0.780 F1 at IoU 0.5): OpenLane-V training list for training (whole segments held out for
+# validation), its validation list (23,021 frames, 138 videos) as the test set, input = 1920x800 band below
+# row 480 at 640x384, scoring by tac_ufld.evaluation.rvld_protocol (F1 at IoU 0.5/0.8, mIoU, flickering and
+# missing rates).
+#
+# Data (LaneDetection/datasets/OpenLane): the full OpenLane images (scripts/download_openlane.py), the
+# OpenLane-V labels and lists from https://github.com/dongkwonjin/RVLD in OpenLane-V/, and the cropped input
+# images built once by `python scripts/build_openlane_v_cache.py <root>`.
+#
+#   $env:OPENLANE_ROOT = "...\datasets\OpenLane"
+#   python -m tac_ufld run --config configs/openlane_v.yaml --confirm --resume
+
+name: openlane_v_cluster
+output_dir: results
+device: auto
+requires_confirmation: true
+description: "OpenLane-V (RVLD protocol), stage A: both baselines and every temporal approach (weighted, gated, flow-aligned, recurrent, attention), seed 1, no HPO (ELAS training recipe)."
+
+data:
+  dataset: openlane_v              # DATASET-SPECIFIC: adapter tac_ufld/data/openlane_v.py
+  root: "${OPENLANE_ROOT}"         # DATASET-SPECIFIC: folder with images/ and OpenLane-V/
+  img_h: 384                       # DATASET-SPECIFIC: RVLD's input size for the 1920x800 band
+  img_w: 640
+  num_lanes: 4                     # DATASET-SPECIFIC: ego and alternative lanes, left to right
+  num_row_anchors: 36              # as the OpenLane runs (UFLD head size of the CULane model)
+  row_anchor_range: [0.30, 0.995]  # DATASET-SPECIFIC: labels start at y ~ 717 of 1280 = 0.30 of the band (RVLD: 270 of 384 rows)
+  griding_num: 100
+  num_frames: 3
+  temporal_step: 1                 # DATASET-SPECIFIC: 10 Hz, history = t-0.1 s, t-0.2 s
+  num_workers: 8
+  jpeg_draft: false                # the cached band is already at the network size
+  augmentation:
+    # No OpenLane-V-specific tuning: the recipe chosen on ELAS validation (configs/elas.yaml, v0.4).
+    geometric:
+      enabled: true
+      prob: 0.7
+      translate_x: 0.08
+      translate_y: 0.05
+      scale: [0.9, 1.1]
+      rotate_deg: 5.0
+      perspective: 0.03
+      crop_scale: [0.85, 1.0]
+    current_frame_prob: 0.3        # degrade only the current frame of 30 % of clips (history stays clean)
+  split:
+    split_seed: 2026
+    val_strategy: sequences        # DATASET-SPECIFIC: whole training segments held out for validation
+    purge_frames: 2
+    val_fraction: 0.10
+    seen_test_fraction: 0.0
+    cap_by_sequence: true
+    max_train_frames: null
+    max_val_frames: 1500           # validation runs after every epoch
+    max_test_frames: null          # the whole OpenLane-V test list
+
+model:
+  # Stage A: every way of using past frames, each against its own baseline on the same seed:
+  # weighted average (v0.2), per-cell gates (v0.3), learned-flow alignment (v0.6, lite v0.5),
+  # recurrent ConvGRU (v0.7, lite v0.6) and cross-frame attention (v0.8, lite v0.7; TGC-Net / LaneTCA family).
+  # Stage B (configs/openlane_v_seeds.yaml) repeats the two primary comparisons with seeds 2 and 3.
+  variants: [ufld_baseline, ufld_v02, ufld_v03, ufld_v06, ufld_v07, ufld_v08,
+             lite_baseline, lite_v05, lite_v06, lite_v07]
+  backbone: "18"
+  pretrained: true
+  ufld_aux: true                   # official UFLD training recipe (use_aux = True)
+
+train:
+  seeds: [1, 2, 3, 4, 5, 6, 7]
+  epochs: 30
+  batch_size: 32                   # official UFLD
+  optimizer: adam
+  lr: 4.0e-4
+  lr_fusion: 5.0e-4
+  weight_decay: 1.0e-4
+  scheduler: cos
+  warmup_iters: 300
+  grad_clip_norm: 1.0
+  early_stopping_patience: 5
+  amp: true
+  lambda_temporal: 0.01
+  lambda_coord: 0.35
+
+hpo:
+  enabled: false
+
+evaluation:
+  primary_pairs: [[ufld_v03, ufld_baseline], [lite_v05, lite_baseline]]
+  postprocess_grid:
+    threshold: [0.4, 0.5]
+    min_points: [2, 3]
+    poly_degree: [0]
+  latency_runs: 50
+  n_visual_examples: 12
+  workers: 4

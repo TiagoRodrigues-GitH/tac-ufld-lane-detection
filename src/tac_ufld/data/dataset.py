@@ -29,7 +29,7 @@ from tac_ufld.config import PROJECT_ROOT, DataConfig, expand_env
 from tac_ufld.data.base import LaneDatasetAdapter
 from tac_ufld.data.geometric import GeometricAugmenter, encode_targets_warped, warp_frames
 from tac_ufld.data.preprocess import Preprocessor, channel_stats, normalize_channels
-from tac_ufld.data.targets import encode_targets
+from tac_ufld.data.targets import encode_targets, seg_from_cls
 from tac_ufld.data.transforms import PhotometricAugmenter, degrade_current_frame, load_frame
 from tac_ufld.data.types import FrameRecord
 
@@ -83,6 +83,8 @@ class TemporalLaneDataset(Dataset):
         augment: bool = False,
         static_history: bool = False,
         eval_degradation_seed: int | None = None,
+        aux_seg: bool = False,
+        eval_degradation_scope: str = "current",
     ) -> None:
         self.records = records
         self.cfg = cfg
@@ -96,10 +98,15 @@ class TemporalLaneDataset(Dataset):
         # seed, so every model sees exactly the same corruptions; the history
         # frames stay clean. ``eval_ops[i]`` is the op of item i.
         self.eval_degradation_seed = eval_degradation_seed
+        # "current": only the current frame is degraded (history clean); "clip": the same degradation on every
+        # frame of the clip (a persistent occluder), see ``degrade_current_frame``.
+        self.eval_degradation_scope = eval_degradation_scope
         ops = list(cfg.augmentation.current_frame_ops)
         self.eval_ops = ([random.Random(f"{eval_degradation_seed}:{i}").choice(ops) for i in range(len(records))]
                          if eval_degradation_seed is not None else None)
         self.row_anchors = row_anchors
+        # UFLD auxiliary segmentation label (model.ufld_aux), derived from the final (augmented) targets
+        self.aux_seg = aux_seg
         self.augmenter = PhotometricAugmenter(cfg.augmentation) if augment else None
         geo = cfg.augmentation.geometric
         self.flip_permutation = getattr(adapter, "flip_permutation", None)
@@ -149,7 +156,7 @@ class TemporalLaneDataset(Dataset):
             rng = random.Random(f"{self.eval_degradation_seed}:{idx}")
             op = rng.choice(list(cfg.augmentation.current_frame_ops))
             gen = torch.Generator().manual_seed(int(self.eval_degradation_seed) * 1_000_003 + idx)
-            frames = degrade_current_frame(frames, cfg.augmentation, op, rng, gen)
+            frames = degrade_current_frame(frames, cfg.augmentation, op, rng, gen, scope=self.eval_degradation_scope)
         t = self.targets[idx]
         if self.geometric is not None:
             sampled = self.geometric.sample(cfg.img_w, cfg.img_h)
@@ -165,7 +172,7 @@ class TemporalLaneDataset(Dataset):
         images = normalize_channels(frames, self.mean, self.std)
         if self.static_history and self.num_frames > 1:
             images = images.expand(self.num_frames, *images.shape[1:]).contiguous()
-        return {
+        item = {
             "images": images,
             "cls": torch.from_numpy(t.cls),
             "exist": torch.from_numpy(t.exist),
@@ -173,3 +180,6 @@ class TemporalLaneDataset(Dataset):
             "valid": torch.from_numpy(t.valid),
             "index": torch.tensor(idx),
         }
+        if self.aux_seg:
+            item["seg"] = torch.from_numpy(seg_from_cls(t.cls, self.row_anchors, cfg.img_w, cfg.img_h, cfg.griding_num))
+        return item

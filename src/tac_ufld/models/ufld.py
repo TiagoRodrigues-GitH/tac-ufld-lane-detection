@@ -44,11 +44,26 @@ def _official_init(module: nn.Module) -> None:
             nn.init.zeros_(m.bias)
 
 
+def _conv_bn_relu(cin: int, cout: int, padding: int = 1, dilation: int = 1) -> nn.Sequential:
+    return nn.Sequential(nn.Conv2d(cin, cout, 3, padding=padding, dilation=dilation, bias=False),
+                         nn.BatchNorm2d(cout), nn.ReLU())
+
+
 class UFLDNet(nn.Module):
+    """The UFLD network (v1, ECCV 2020): ResNet backbone + global fully connected row-anchor classifier.
+
+    What it does: the ResNet turns the image into a 512-channel map at 1/32 resolution; a 1x1 conv squeezes it to
+    8 channels; the map is flattened and two Linear layers (hidden 2048) output, for every row anchor and lane
+    slot, G+1 scores: one per horizontal cell plus "no lane". Because the classifier sees the WHOLE image at
+    once (global features), it can place a lane where the marking is faded or hidden.
+
+    ``encode`` (backbone only) and ``classify`` (head only) are split so the temporal models can fuse features of
+    several frames in between. ``aux=True`` adds the official training-only segmentation branch."""
+
     def __init__(
         self, num_lanes: int, num_row_anchors: int, griding_num: int,
         img_h: int, img_w: int, backbone: str = "18", pretrained: bool = True,
-        in_channels: int = 3, head_dropout: float = 0.0, head_hidden: int = 2048,
+        in_channels: int = 3, head_dropout: float = 0.0, head_hidden: int = 2048, aux: bool = False,
     ) -> None:
         super().__init__()
         self.cls_dim = (griding_num + 1, num_row_anchors, num_lanes)
@@ -61,9 +76,29 @@ class UFLDNet(nn.Module):
         # Optional, parameter-free: keeps the official state-dict layout (cls.0 / cls.2).
         self.head_dropout = nn.Dropout(head_dropout) if head_dropout > 0 else nn.Identity()
         _official_init(self.cls)
+        self.aux = aux
+        if aux:  # official ``use_aux`` branch (ResNet-18/34 widths): segmentation at stride 8, training only
+            self.aux_header2 = nn.Sequential(_conv_bn_relu(128, 128), *[_conv_bn_relu(128, 128) for _ in range(3)])
+            self.aux_header3 = nn.Sequential(_conv_bn_relu(256, 128), *[_conv_bn_relu(128, 128) for _ in range(2)])
+            self.aux_header4 = nn.Sequential(_conv_bn_relu(512, 128), _conv_bn_relu(128, 128))
+            self.aux_combine = nn.Sequential(
+                _conv_bn_relu(384, 256, padding=2, dilation=2), _conv_bn_relu(256, 128, padding=2, dilation=2),
+                _conv_bn_relu(128, 128, padding=2, dilation=2), _conv_bn_relu(128, 128, padding=4, dilation=4),
+                nn.Conv2d(128, num_lanes + 1, 1),
+            )
+            for head in (self.aux_header2, self.aux_header3, self.aux_header4, self.aux_combine):
+                _official_init(head)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)[-1]
+
+    def aux_segment(self, x2: torch.Tensor, x3: torch.Tensor, x4: torch.Tensor) -> torch.Tensor:
+        """(B, num_lanes + 1, H/8, W/8) lane-segmentation logits from backbone stages 2-4 (official forward;
+        upsampled to stage 2's size, which equals the official scale factors 2 and 4 for sizes divisible by 32)."""
+        size = x2.shape[-2:]
+        x3 = F.interpolate(self.aux_header3(x3), size=size, mode="bilinear")
+        x4 = F.interpolate(self.aux_header4(x4), size=size, mode="bilinear")
+        return self.aux_combine(torch.cat([self.aux_header2(x2), x3, x4], dim=1))
 
     def classify(self, features: torch.Tensor) -> torch.Tensor:
         flat = self.pool(features).flatten(1)
@@ -93,6 +128,9 @@ class UFLDSingleFrame(nn.Module):
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         if x.dim() == 5:
             x = x[:, -1]
+        if self.training and self.ufld.aux:
+            x2, x3, x4 = self.ufld.model(x)
+            return {"logits": self.ufld.classify(x4), "aux_seg": self.ufld.aux_segment(x2, x3, x4)}
         return {"logits": self.ufld(x)}
 
 
@@ -168,9 +206,13 @@ class UFLDTemporal(nn.Module):
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, t, c, h, w = x.shape
-        feats = self.ufld.encode(x.reshape(b * t, c, h, w))
+        x2, x3, feats = self.ufld.model(x.reshape(b * t, c, h, w))
         fused, extra = self.fusion(feats.reshape(b, t, *feats.shape[1:]))
-        return {"logits": self.ufld.classify(fused), **extra}
+        out = {"logits": self.ufld.classify(fused), **extra}
+        if self.training and self.ufld.aux:  # the baseline's auxiliary loss, on the current frame
+            cur = lambda f: f.reshape(b, t, *f.shape[1:])[:, -1]  # noqa: E731
+            out["aux_seg"] = self.ufld.aux_segment(cur(x2), cur(x3), cur(feats))
+        return out
 
     def per_frame_logits(self, x: torch.Tensor, indices: tuple[int, ...]) -> list[torch.Tensor]:
         """Single-frame predictions of selected frames (temporal-consistency loss)."""

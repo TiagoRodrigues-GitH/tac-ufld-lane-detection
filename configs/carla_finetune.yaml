@@ -1,0 +1,48 @@
+# Fine-tune the ELAS-trained light models on CARLA lane data, for the closed-loop test (docs/CARLA.md,
+# "Closing the ELAS -> CARLA perception gap"). Read by scripts/carla_finetune.py, NOT by `python -m tac_ufld run`:
+# the script starts from each checkpoint's own configuration (architecture, preprocessing, row anchors,
+# augmentation) and overrides only the `experiment` block below; the splits are built from `carla` and `elas`.
+#
+#   python scripts/carla_finetune.py --config configs/carla_finetune.yaml --variants lite_tsm lite_v05
+
+checkpoints:
+  lite_tsm: results/review_lite_tsm_pilot/seed_1/checkpoints/lite_tsm.pt
+  lite_v05: results/review_lite_aligned_pilot/seed_1/checkpoints/lite_v05.pt
+
+# Scored as they are by --evaluate-only (no fine-tuning): the full-size baseline for reference.
+reference_checkpoints:
+  ufld_baseline: results/elas_pilot_v2/seed_1/checkpoints/ufld_baseline.pt
+
+carla:
+  # scripts/carla_collect_elas.py output (ELAS layout, 640x480, the closed-loop camera)
+  root: "${CARLA_LANES_ROOT:-C:/CARLA/lane_data/carla_elas}"
+  train_towns: [Town10HD_Opt, Town03, Town01, Town02]
+  val_towns: [Town05]                 # held-out town: early stopping and post-processing tuning
+  # Test town: never trained or selected on (rural two-lane roads, 8 scenes, 587 labelled frames, collected
+  # 2026-10-20 with --seed 9). Scored by --evaluate-only; the 2026-10-19 fine-tuning ran without it, so its
+  # carla_finetune.csv reports Town05 (validation) as carla_val.
+  test_towns: [Town07]
+  excluded_towns: [Town04, Town06]    # the closed-loop test towns: never used here (the script refuses them)
+
+elas:
+  root: "${ELAS_ROOT:-../../datasets/dataset_elas_v1}"
+  # A share of real frames keeps the ELAS skills (taken from the checkpoint's own training scenes, every
+  # `frame_every`-th labelled frame). Test = the checkpoint's held-out ELAS scenes (forgetting check).
+  mix_scenes: [BR_S01, ROD_S03, VIX_S11, GRI_S01]
+  frame_every: 3
+
+experiment:
+  output_dir: results
+  train:
+    seeds: [1]
+    # 4 epochs at 1e-4 (first try, 2026-10-19) stopped with validation F1 still rising (0.03 -> 0.22 on Town05)
+    epochs: 10
+    early_stopping_patience: 3
+    lr: 2.0e-4            # half the ELAS training rate
+    lr_fusion: 2.5e-4
+    warmup_iters: 100
+  hpo:
+    enabled: false
+  evaluation:
+    tensorboard: false
+    carry_state_eval: false

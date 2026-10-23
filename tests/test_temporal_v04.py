@@ -151,7 +151,8 @@ def test_new_variants_are_registered_and_paired():
     order = training_order(["ufld_v07", "ufld_baseline_ct", "lite_v06"], cfg)
     assert order.index("ufld_baseline") < order.index("ufld_baseline_ct")
     assert order.index("lite_baseline") < order.index("lite_v06")
-    for key in ("ufld_v02", "ufld_v03", "ufld_v04", "ufld_v06", "ufld_v07", "lite_v05", "lite_v06"):
+    for key in ("ufld_v02", "ufld_v03", "ufld_v04", "ufld_v06", "ufld_v07", "lite_v05", "lite_v06",
+                "lite_v06_occ", "lite_tsm", "lite_tsm_static"):
         spec = VARIANTS[key]
         assert spec.temporal and spec.reference.endswith("_baseline")
         assert spec.budget_reference == f"{spec.family}_baseline_ct"
@@ -159,7 +160,7 @@ def test_new_variants_are_registered_and_paired():
     assert warm_start(ct, build_model("ufld_baseline", cfg).state_dict()) == ["<all>"]
 
 
-@pytest.mark.parametrize("variant", ["ufld_v07", "lite_v06"])
+@pytest.mark.parametrize("variant", ["ufld_v07", "lite_v06", "lite_v06_occ"])  # not lite_tsm: the shift acts at once
 def test_recurrent_models_start_as_their_baseline(variant):
     cfg = _cfg()
     spec = VARIANTS[variant]
@@ -174,7 +175,7 @@ def test_recurrent_models_start_as_their_baseline(variant):
         assert torch.allclose(model(x)["logits"], base(x[:, -1])["logits"], atol=1e-5)
 
 
-@pytest.mark.parametrize("variant", ["ufld_v07", "lite_v06"])
+@pytest.mark.parametrize("variant", ["ufld_v07", "lite_v06", "lite_v06_occ"])  # lite_tsm: tests/test_lite_tsm_occ.py
 def test_carry_mode_equals_window_mode_until_the_window_is_full(tmp_path, variant):
     cfg = _cfg()
     loaded = load_model(_checkpoint(tmp_path, variant, cfg))

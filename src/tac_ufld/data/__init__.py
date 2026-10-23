@@ -10,7 +10,7 @@ from tac_ufld.data.types import FrameRecord
 if TYPE_CHECKING:
     from tac_ufld.config import ExperimentConfig
 
-KNOWN_DATASETS = ("elas", "culane", "tusimple", "openlane")
+KNOWN_DATASETS = ("elas", "culane", "tusimple", "openlane", "openlane_v")
 
 
 def build_adapter(cfg: "ExperimentConfig") -> LaneDatasetAdapter:
@@ -38,6 +38,10 @@ def build_adapter(cfg: "ExperimentConfig") -> LaneDatasetAdapter:
 
         return OpenLaneAdapter(root, segments=cfg.data.scenes or None,
                                skip_unattributed_frames=cfg.data.skip_unattributed_frames)
+    if name == "openlane_v":
+        from tac_ufld.data.openlane_v import OpenLaneVAdapter
+
+        return OpenLaneVAdapter(root, img_size=(cfg.data.img_w, cfg.data.img_h), segments=cfg.data.scenes or None)
     raise ValueError(f"dataset '{cfg.data.dataset}' has no adapter (supported: {list(KNOWN_DATASETS)})")
 
 

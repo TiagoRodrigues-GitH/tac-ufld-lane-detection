@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from tac_ufld.decoding import decode_logits
+from tac_ufld.decoding import decode_logits, position_variance
 
 
 @dataclass
@@ -19,17 +19,20 @@ class Predictions:
     x: np.ndarray               # (N, A, L) x position, model pixels
     current_weight: np.ndarray  # (N,) weight on the current frame after fusion (NaN if n/a)
     loss: float | None = None   # mean comparable (focal) loss, when a loss_fn is given
+    x_var: np.ndarray | None = None  # (N, A, L) predictive variance of x, model px^2 (``decoding.position_variance``)
 
 
 def _current_frame_weight(outputs: dict, batch_size: int) -> np.ndarray:
     """Share of the fused feature coming from the current frame:
-    v02/v04 softmax weight, v03 mean gate, v05 1 - residual gate."""
+    v02/v04 softmax weight, v03 mean gate, v05 1 - residual gate, v08 1 - attention on past frames."""
     if "fusion_weights" in outputs:
         return np.full(batch_size, float(outputs["fusion_weights"][-1]), dtype=np.float32)
     if "gates" in outputs:
         return outputs["gates"][:, -1].float().mean(dim=(1, 2, 3)).cpu().numpy()
     if "gate" in outputs:
         return (1.0 - outputs["gate"].float().mean(dim=(1, 2, 3))).cpu().numpy()
+    if "history_attention" in outputs:  # v08 / lite v0.7: attention share left on the current frame
+        return (1.0 - outputs["history_attention"].float()).cpu().numpy()
     return np.full(batch_size, np.nan, dtype=np.float32)
 
 
@@ -46,7 +49,7 @@ def predict(
     """Run ``model`` over ``loader`` (which must not shuffle). ``static_history``
     replaces every history frame by the current frame (temporal ablation)."""
     model.eval()
-    exist_all, x_all, weight_all, losses = [], [], [], []
+    exist_all, x_all, var_all, weight_all, losses = [], [], [], [], []
     autocast = torch.autocast("cuda") if (amp and device.startswith("cuda")) else nullcontext()
     for batch in loader:
         images = batch["images"].to(device, non_blocking=True)
@@ -58,7 +61,9 @@ def predict(
         exist, bins = decode_logits(logits)
         grid = logits.shape[1] - 1
         exist_all.append(exist.cpu().numpy())
-        x_all.append((bins * (img_w - 1) / (grid - 1)).cpu().numpy())
+        cell = (img_w - 1) / (grid - 1)  # model px per grid cell
+        x_all.append((bins * cell).cpu().numpy())
+        var_all.append((position_variance(logits) * cell * cell).cpu().numpy())
         weight_all.append(_current_frame_weight(outputs, images.shape[0]))
         if loss_fn is not None:
             gpu_batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -73,4 +78,5 @@ def predict(
         x=np.concatenate(x_all).astype(np.float32),
         current_weight=np.concatenate(weight_all).astype(np.float32),
         loss=mean_loss,
+        x_var=np.concatenate(var_all).astype(np.float32),
     )

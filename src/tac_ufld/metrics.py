@@ -45,41 +45,83 @@ def f_beta(precision: float, recall: float, beta: float) -> float:
 
 @dataclass
 class AnchorCounts:
+    """Additive per-cell counts (sums over frames, so frames can be scored in worker processes).
+
+    ``tp/fp/fn/tn`` follow the convention above (a wrong location is both FP and FN). The split counts
+    separate the two error types of a row-anchor detector (added 2026-10-18): ``fp_exist`` = lane claimed where
+    there is none (false alarm), ``fn_exist`` = lane missed, ``wrong`` = lane found at the wrong cell, ``both`` =
+    cells where GT and prediction both say "lane". ``err_*`` are sums of |x_pred - x_gt| in original pixels over
+    the ``both`` cells, split into the far quarter of the annotated band and the rest (near), as in ELAS's
+    near/far lane-estimation error (Berriel et al. 2017)."""
+
     tp: int = 0
     fp: int = 0
     fn: int = 0
     tn: int = 0
+    fp_exist: int = 0
+    fn_exist: int = 0
+    wrong: int = 0
+    both: int = 0
+    err_near: float = 0.0
+    n_near: int = 0
+    err_far: float = 0.0
+    n_far: int = 0
 
     def __iadd__(self, other: "AnchorCounts") -> "AnchorCounts":
-        self.tp += other.tp
-        self.fp += other.fp
-        self.fn += other.fn
-        self.tn += other.tn
+        for name in self.__dataclass_fields__:
+            setattr(self, name, getattr(self, name) + getattr(other, name))
         return self
 
     def as_metrics(self, prefix: str = "anchor_") -> dict[str, float]:
         p, r, f1 = prf(self.tp, self.fp, self.fn)
         total = self.tp + self.fp + self.fn + self.tn
+        nan = float("nan")
+        n_err = self.n_near + self.n_far
         return {f"{prefix}precision": p, f"{prefix}recall": r, f"{prefix}f1": f1,
                 f"{prefix}accuracy": (self.tp + self.tn) / total if total else 0.0,
-                f"{prefix}tp": self.tp, f"{prefix}fp": self.fp, f"{prefix}fn": self.fn, f"{prefix}tn": self.tn}
+                f"{prefix}tp": self.tp, f"{prefix}fp": self.fp, f"{prefix}fn": self.fn, f"{prefix}tn": self.tn,
+                # existence errors as rates of their own population (lower is better)
+                f"{prefix}false_alarm_rate": self.fp_exist / (self.fp_exist + self.tn) if self.fp_exist + self.tn else nan,
+                # its population: on ELAS almost every cell holds a lane, so few negatives (report it with the rate)
+                f"{prefix}gt_negative_cells": self.fp_exist + self.tn,
+                f"{prefix}miss_rate": self.fn_exist / (self.fn_exist + self.both) if self.fn_exist + self.both else nan,
+                f"{prefix}wrong_position_rate": self.wrong / self.both if self.both else nan,
+                # lateral position error where both say "lane", original pixels (lower is better)
+                f"{prefix}mae_px": (self.err_near + self.err_far) / n_err if n_err else nan,
+                f"{prefix}mae_near_px": self.err_near / self.n_near if self.n_near else nan,
+                f"{prefix}mae_far_px": self.err_far / self.n_far if self.n_far else nan}
 
 
 def anchor_counts(exist_prob: np.ndarray, x_model: np.ndarray, target_cls: np.ndarray,
-                  threshold: float, tol_bins: int, img_w: int, griding_num: int) -> AnchorCounts:
-    """Arrays may be (A, L) or (B, A, L). Cells with IGNORE_INDEX are skipped."""
+                  threshold: float, tol_bins: int, img_w: int, griding_num: int,
+                  x_target: np.ndarray | None = None, px_scale: float = 1.0,
+                  far_rows: np.ndarray | None = None) -> AnchorCounts:
+    """Arrays may be (A, L) or (B, A, L). Cells with IGNORE_INDEX are skipped.
+
+    ``x_target`` (model px, same shape) enables the position errors, scaled to original pixels by ``px_scale``;
+    ``far_rows`` (A,) bool marks the anchors of the far quarter of the annotated band."""
     valid = target_cls != IGNORE_INDEX
     gt_pos = valid & (target_cls < griding_num)
     pred_pos = valid & (exist_prob >= threshold)
     close = np.abs(x_to_bin(x_model, img_w, griding_num) - target_cls) <= tol_bins
     both = pred_pos & gt_pos
     wrong = both & ~close
-    return AnchorCounts(
+    counts = AnchorCounts(
         tp=int((both & close).sum()),
         fp=int((pred_pos & ~gt_pos).sum() + wrong.sum()),
         fn=int((~pred_pos & gt_pos).sum() + wrong.sum()),
         tn=int((valid & ~pred_pos & ~gt_pos).sum()),
+        fp_exist=int((pred_pos & ~gt_pos).sum()), fn_exist=int((~pred_pos & gt_pos).sum()),
+        wrong=int(wrong.sum()), both=int(both.sum()),
     )
+    if x_target is not None:
+        err = np.abs(x_model - x_target) * px_scale
+        far = np.zeros(target_cls.shape, dtype=bool)
+        if far_rows is not None:  # (A,) -> (..., A, L)
+            far = far | np.asarray(far_rows, dtype=bool).reshape(-1, 1)
+        counts.err_near, counts.n_near = float(err[both & ~far].sum()), int((both & ~far).sum())
+        counts.err_far, counts.n_far = float(err[both & far].sum()), int((both & far).sum())
+    return counts
 
 
 # ------------------------------------------------------------------ lane level
@@ -89,12 +131,36 @@ def culane_line_width(image_w: int, ref_width: float = 30.0, ref_image_w: float 
     return max(1, int(round(ref_width * image_w / ref_image_w)))
 
 
-def lane_mask(points: np.ndarray, width: int, height: int, line_width: int) -> np.ndarray:
+def spline_points(pts: np.ndarray, per_segment: int = 50) -> np.ndarray:
+    """Dense points on the interpolating cubic spline through ``pts`` (sorted by y), as the CULane evaluation
+    does before drawing a lane (official tool ``splineInterpTimes``; the Python port of LaneATT,
+    ``culane_metric.interp``: ``splprep(s=0, k=min(3, n-1))`` sampled ``per_segment`` times per segment).
+    Falls back to the input points when the spline cannot be fitted (fewer than 2 distinct points)."""
+    from scipy.interpolate import splev, splprep
+
+    keep = np.r_[True, np.any(np.diff(pts, axis=0) != 0, axis=1)]  # splprep fails on repeated points
+    pts = pts[keep]
+    if len(pts) < 2:
+        return pts
+    try:
+        tck, u = splprep([pts[:, 0], pts[:, 1]], s=0, k=min(3, len(pts) - 1))
+        dense = np.asarray(splev(np.linspace(0.0, 1.0, (len(u) - 1) * per_segment + 1), tck)).T
+    except (ValueError, TypeError):
+        return pts
+    return dense.astype(np.float32)
+
+
+def lane_mask(points: np.ndarray, width: int, height: int, line_width: int, interp: str = "linear") -> np.ndarray:
+    """Lane rasterised as a ``line_width`` polyline. ``interp="spline"``: the points are first replaced by
+    their interpolating cubic spline, as in the official CULane evaluation (used for CULane, 2026-10-23);
+    ``"linear"``: straight segments between the given points (every other dataset, as before)."""
     mask = np.zeros((height, width), dtype=np.uint8)
     pts = np.asarray(points, dtype=np.float32)
     pts = pts[np.isfinite(pts).all(axis=1)]
     if len(pts) >= 2:
-        pts = pts[np.argsort(pts[:, 1])]
+        pts = pts[np.argsort(pts[:, 1], kind="stable")]
+        if interp == "spline":
+            pts = spline_points(pts)
         cv2.polylines(mask, [np.round(pts).astype(np.int32).reshape(-1, 1, 2)], False, 1,
                       thickness=line_width, lineType=cv2.LINE_8)
     return mask.astype(bool)

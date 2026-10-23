@@ -52,7 +52,11 @@ class LoadedModel:
 
 def config_from_checkpoint(payload: dict, config_path: str | Path | None = None) -> ExperimentConfig:
     if "config" in payload:
-        cfg = _build(ExperimentConfig, payload["config"])
+        raw = payload["config"]
+        if isinstance(raw.get("model"), dict) and "lite_anchor_rows" not in raw["model"]:
+            # trained before the lite-head fix (2026-10-18): rebuild the head it was trained with
+            raw = {**raw, "model": {**raw["model"], "lite_anchor_rows": "uniform"}}
+        cfg = _build(ExperimentConfig, raw)
         cfg.validate()
         return cfg
     if config_path is None:

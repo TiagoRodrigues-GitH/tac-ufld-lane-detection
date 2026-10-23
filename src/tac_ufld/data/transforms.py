@@ -74,13 +74,45 @@ def _shadow_mask(h: int, w: int) -> np.ndarray:
 
 
 def degrade_current_frame(frames: torch.Tensor, cfg: AugmentationConfig, op: str, rng=random,
-                          generator: torch.Generator | None = None) -> torch.Tensor:
-    """Apply one degradation ``op`` (occlude | blur | darken | noise) to the
-    LAST frame of the clip (RGB in [0, 1]); earlier frames are untouched.
+                          generator: torch.Generator | None = None, scope: str = "current") -> torch.Tensor:
+    """Apply one degradation ``op`` to the LAST frame of the clip (RGB in [0, 1]); earlier frames are untouched.
+
+    ``op``: occlude | blur | darken | noise (the training set) or shadow | glare (held-out: never used in
+    training unless configured, so the robustness test can measure corruptions the models have not seen).
+    ``scope="clip"`` (robustness evaluation only) applies the SAME op with the SAME parameters to every frame
+    of the clip: a persistent occluder, as a vehicle ahead or glare is over 67-133 ms, when the history cannot
+    simply be read instead of the current frame.
+
+    ``scope="independent"`` (robustness evaluation only, added 2026-10-19) applies the same op to every frame
+    but draws its parameters and content independently per frame: fresh sensor noise, occluders at other
+    places, fluctuating blur and brightness. Unlike ``clip``, the history then holds evidence the current frame
+    lacks, which is the regime where temporal fusion can genuinely help under a lasting condition.
 
     ``rng`` (the ``random`` module or a ``random.Random``) and ``generator``
     (a ``torch.Generator``, None = global) make it reproducible: training uses
     the global streams, the robustness evaluation a fixed seed per frame."""
+    if scope == "current":
+        return _degrade_last(frames, cfg, op, rng, generator)
+    if scope == "independent":
+        out = frames.clone()
+        for i in range(frames.shape[0]):  # oldest -> current, each frame with its own draws
+            out[i] = _degrade_last(frames[i:i + 1], cfg, op, rng, generator)[0]
+        return out
+    if scope != "clip":
+        raise ValueError(f"unknown degradation scope '{scope}'")
+    rng_state = rng.getstate()
+    gen_state = generator.get_state() if generator is not None else None
+    out = frames.clone()
+    for i in range(frames.shape[0]):  # replay the same random draws for every frame
+        rng.setstate(rng_state)
+        if generator is not None:
+            generator.set_state(gen_state)
+        out[i] = _degrade_last(frames[i:i + 1], cfg, op, rng, generator)[0]
+    return out
+
+
+def _degrade_last(frames: torch.Tensor, cfg: AugmentationConfig, op: str, rng,
+                  generator: torch.Generator | None) -> torch.Tensor:
     frames = frames.clone()
     cur = frames[-1]
     c, h, w = cur.shape
@@ -103,6 +135,19 @@ def degrade_current_frame(frames: torch.Tensor, cfg: AugmentationConfig, op: str
     elif op == "noise":
         noise = torch.randn(cur.shape, generator=generator, dtype=cur.dtype)
         cur = (cur + noise * rng.uniform(*cfg.current_noise_std)).clamp(0.0, 1.0)
+    elif op == "shadow":  # held-out: a cast shadow band across the road (trees, bridges, buildings)
+        x_top = sorted(rng.uniform(0, w) for _ in range(2))
+        x_bot = sorted(rng.uniform(0, w) for _ in range(2))
+        poly = np.array([[x_top[0], 0], [x_top[1], 0], [x_bot[1], h - 1], [x_bot[0], h - 1]], dtype=np.int32)
+        mask = np.zeros((h, w), dtype=np.float32)
+        cv2.fillPoly(mask, [poly], 1.0)
+        cur = cur * (1.0 - rng.uniform(0.5, 0.8) * torch.from_numpy(mask))
+    elif op == "glare":  # held-out: sun glare / headlights, a saturated blob in the upper road band
+        cy, cx = rng.uniform(0.35, 0.7) * (h - 1), rng.uniform(0.2, 0.8) * (w - 1)
+        radius = rng.uniform(0.15, 0.35) * w
+        ys, xs = torch.meshgrid(torch.arange(h, dtype=cur.dtype), torch.arange(w, dtype=cur.dtype), indexing="ij")
+        blob = torch.exp(-((ys - cy) ** 2 + (xs - cx) ** 2) / (2 * (radius / 2) ** 2))
+        cur = (cur + rng.uniform(0.6, 1.0) * blob).clamp(0.0, 1.0)
     else:
         raise ValueError(f"unknown current-frame degradation '{op}'")
     frames[-1] = cur
@@ -131,11 +176,16 @@ class PhotometricAugmenter:
         return frames
 
     def _degrade_current(self, frames: torch.Tensor) -> torch.Tensor:
-        """Degrade frames[-1] only; the history frames are returned untouched."""
+        """Degrade frames[-1] only (history untouched), or, for ``current_frame_persistent_share`` of the degraded
+        clips, every frame with the same parameters. The share draws a random number only when it is > 0, so
+        configs without it reproduce earlier runs exactly."""
         cfg = self.cfg
         if random.random() >= cfg.current_frame_prob:
             return frames
-        return degrade_current_frame(frames, cfg, random.choice(cfg.current_frame_ops))
+        op = random.choice(cfg.current_frame_ops)
+        persistent = (cfg.current_frame_persistent_share > 0 and frames.shape[0] > 1
+                      and random.random() < cfg.current_frame_persistent_share)
+        return degrade_current_frame(frames, cfg, op, scope="clip" if persistent else "current")
 
     def _photometric(self, frames: torch.Tensor) -> torch.Tensor:
         cfg = self.cfg

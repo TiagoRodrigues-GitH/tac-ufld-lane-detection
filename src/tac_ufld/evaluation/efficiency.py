@@ -9,11 +9,20 @@ from torch import nn
 
 
 def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters())
+    """Parameters used at inference: the training-only auxiliary segmentation branch of UFLD is excluded, as in
+    the UFLD paper."""
+    return sum(p.numel() for name, p in model.named_parameters() if ".aux_" not in f".{name}")
 
 
 def count_macs(model: nn.Module, dummy: torch.Tensor) -> int:
-    """Multiply-accumulates of Conv2d and Linear layers for one forward pass."""
+    """Multiply-accumulates of one forward pass: Conv2d, Linear, multi-head attention and the lite head's
+    anchor-row pooling (element-wise ops, normalisation and grid sampling are not counted).
+
+    ``nn.MultiheadAttention`` runs its projections functionally, so the Linear hook never sees them (its
+    ``out_proj`` is never *called*); before 2026-10-18 the attention fusions (ufld_v08, lite_v07) were therefore
+    under-counted. Its hook adds the Q/K/V and output projections and the two attention products."""
+    from tac_ufld.models.lite import AnchorRowPool
+
     macs = [0]
 
     def conv_hook(m: nn.Conv2d, _inp, out):
@@ -22,12 +31,30 @@ def count_macs(model: nn.Module, dummy: torch.Tensor) -> int:
     def linear_hook(m: nn.Linear, _inp, out):
         macs[0] += out.numel() * m.in_features
 
+    def attention_hook(m: nn.MultiheadAttention, inp, _out):
+        q, k = inp[0], inp[1]
+        if not m.batch_first:  # (L, B, E) -> (B, L, E)
+            q, k = q.transpose(0, 1), k.transpose(0, 1)
+        b, lq, e = q.shape
+        lk = k.shape[1]
+        macs[0] += b * (lq * e * e + 2 * lk * e * e + lq * e * e)  # Q, K, V and output projections
+        macs[0] += b * 2 * lq * lk * e                              # Q K^T and attention x V
+
+    def row_pool_hook(m: AnchorRowPool, inp, out):
+        b, c, h, w = inp[0].shape
+        anchors, grid = out.shape[-2], out.shape[-1]
+        macs[0] += b * c * (anchors * h * w + anchors * w * grid)
+
     handles = []
     for m in model.modules():
         if isinstance(m, nn.Conv2d):
             handles.append(m.register_forward_hook(conv_hook))
+        elif isinstance(m, nn.MultiheadAttention):
+            handles.append(m.register_forward_hook(attention_hook))
         elif isinstance(m, nn.Linear):
             handles.append(m.register_forward_hook(linear_hook))
+        elif isinstance(m, AnchorRowPool):
+            handles.append(m.register_forward_hook(row_pool_hook))
     try:
         with torch.no_grad():
             model(dummy)

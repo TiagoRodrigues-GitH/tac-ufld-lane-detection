@@ -22,6 +22,20 @@ def decode_logits(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return exist, (grid * bins).sum(dim=1)
 
 
+def position_variance(logits: torch.Tensor) -> torch.Tensor:
+    """(B, A, L) variance of the cell index under the softmax over the G location cells, in cells^2.
+
+    The head's softmax is a predictive distribution over the lane position, so besides its mean (the official
+    UFLD estimate, ``decode_logits``) it also gives its spread, Var = E[i^2] - E[i]^2. A sharp distribution
+    means a confident frame; an occluded or blurred frame spreads it. Used as the per-frame measurement
+    noise R_k of the uncertainty-aware Kalman tracker (``evaluation.tracking``; Särkkä 2013, Theorem 4.2, which
+    allows a time-varying R_k)."""
+    grid = F.softmax(logits.float()[:, :-1], dim=1)
+    bins = torch.arange(grid.shape[1], device=logits.device, dtype=grid.dtype).view(1, -1, 1, 1)
+    mean = (grid * bins).sum(dim=1)
+    return ((grid * bins.pow(2)).sum(dim=1) - mean.pow(2)).clamp_min(0.0)
+
+
 def exist_logits(logits: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """logit(1 - p(no lane)): the existence logit used by the variant BCE terms."""
     p_no = F.softmax(logits.float(), dim=1)[:, -1]
